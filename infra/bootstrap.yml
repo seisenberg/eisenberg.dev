@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  eisenmail bootstrap (deploy once, as an administrator): container registry, storage buckets,
+  the two Lambda execution roles and the role GitHub Actions deploys with. Contains no secrets.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eisenmail
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+  GitHubRepository:
+    Type: String
+    Default: seisenberg/eisenberg.dev
+    Description: owner/name of the repository allowed to deploy.
+  GitHubEnvironment:
+    Type: String
+    Default: production
+    Description: Only workflow jobs running in this GitHub environment can assume the deploy role.
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set to false if this account already has the token.actions.githubusercontent.com provider.
+  SiteOrigins:
+    Type: CommaDelimitedList
+    Default: https://eisenberg.dev
+    Description: Origins allowed to upload to the file drop from the browser (the site's own URL or URLs).
+  MailRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: Raw mail objects written by SES are deleted after this many days (the database keeps the mail).
+
+Conditions:
+  CreateOidc: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+
+Resources:
+  # ---- GitHub Actions: short-lived credentials through OIDC, no stored keys --------------------
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidc
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-github-deploy"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !If
+                - CreateOidc
+                - !Ref GitHubOidcProvider
+                - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # exactly this repository AND this environment; nothing from forks or other branches
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepository}:environment:${GitHubEnvironment}"
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: RegistryLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: PushImages
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt Registry.Arn
+              - Sid: UpdateFunctionCode
+                Effect: Allow
+                Action:
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:UpdateFunctionCode
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-web"
+                  - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-inbox"
+
+  # ---- container registry -------------------------------------------------------------------------
+  Registry:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ProjectName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"keep the 20 most recent images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":20},"action":{"type":"expire"}}]}
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LambdaPull
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Condition:
+              StringLike:
+                aws:sourceArn: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:*"
+
+  # ---- storage: every bucket private, encrypted, TLS only -------------------------------------
+  MailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-mail-${AWS::AccountId}"
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-raw-mail
+            Status: Enabled
+            Prefix: email-inbox/
+            ExpirationInDays: !Ref MailRetentionDays
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+
+  MailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SesWritesIncomingMail
+            Effect: Allow
+            Principal: { Service: ses.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "${MailBucket.Arn}/email-inbox/*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt MailBucket.Arn, !Sub "${MailBucket.Arn}/*"]
+            Condition:
+              Bool: { aws:SecureTransport: "false" }
+
+  FilesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-files-${AWS::AccountId}"
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      VersioningConfiguration: { Status: Enabled }
+      LifecycleConfiguration:
+        Rules:
+          - Id: tidy
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: 30 }
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+      CorsConfiguration:
+        CorsRules:
+          # the browser uploads straight to S3 with a presigned URL
+          - AllowedMethods: [PUT]
+            AllowedOrigins: !Ref SiteOrigins
+            AllowedHeaders: [content-type]
+            MaxAge: 600
+
+  PublicFilesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # "public" files are still not publicly readable: the site hands out short-lived signed links
+      BucketName: !Sub "${ProjectName}-public-files-${AWS::AccountId}"
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      LifecycleConfiguration:
+        Rules:
+          - Id: tidy
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+
+  FilesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FilesBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt FilesBucket.Arn, !Sub "${FilesBucket.Arn}/*"]
+            Condition:
+              Bool: { aws:SecureTransport: "false" }
+
+  PublicFilesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PublicFilesBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt PublicFilesBucket.Arn, !Sub "${PublicFilesBucket.Arn}/*"]
+            Condition:
+              Bool: { aws:SecureTransport: "false" }
+
+  # ---- Lambda execution roles (least privilege) -------------------------------------------------
+  WebRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-web"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: web
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SendMail
+                Effect: Allow
+                Action: [ses:SendEmail, ses:SendRawEmail]
+                Resource: !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*"
+              - Sid: FileDropObjects
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource:
+                  - !Sub "${FilesBucket.Arn}/drop/*"
+                  - !Sub "${PublicFilesBucket.Arn}/public/*"
+              - Sid: FileDropList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: [!GetAtt FilesBucket.Arn, !GetAtt PublicFilesBucket.Arn]
+              - Sid: DeleteRawMailOnPermanentDelete
+                Effect: Allow
+                Action: s3:DeleteObject
+                Resource: !Sub "${MailBucket.Arn}/email-inbox/*"
+              - Sid: ReadOwnSecrets
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*"
+
+  InboxRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-inbox"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: inbox
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadIncomingMail
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${MailBucket.Arn}/email-inbox/*"
+              - Sid: ForwardRelayBounce
+                Effect: Allow
+                Action: [ses:SendRawEmail, ses:SendBounce]
+                Resource: !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*"
+              - Sid: ReadOwnSecrets
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*"
+
+Outputs:
+  DeployRoleArn:
+    Description: Set as the GitHub variable AWS_DEPLOY_ROLE_ARN.
+    Value: !GetAtt DeployRole.Arn
+  RegistryUri:
+    Value: !GetAtt Registry.RepositoryUri
+    Export: { Name: !Sub "${ProjectName}-registry-uri" }
+  MailBucketName:
+    Value: !Ref MailBucket
+    Export: { Name: !Sub "${ProjectName}-mail-bucket" }
+  FilesBucketName:
+    Value: !Ref FilesBucket
+    Export: { Name: !Sub "${ProjectName}-files-bucket" }
+  PublicFilesBucketName:
+    Value: !Ref PublicFilesBucket
+    Export: { Name: !Sub "${ProjectName}-public-files-bucket" }
+  WebRoleArn:
+    Value: !GetAtt WebRole.Arn
+    Export: { Name: !Sub "${ProjectName}-web-role-arn" }
+  InboxRoleArn:
+    Value: !GetAtt InboxRole.Arn
+    Export: { Name: !Sub "${ProjectName}-inbox-role-arn" }

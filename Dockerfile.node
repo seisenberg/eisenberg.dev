@@ -1,0 +1,32 @@
+# eisenmail web: the Koa server behind the AWS Lambda Web Adapter.
+# No secrets are baked into this image. The ssh tunnel key (if a tunnel is used) is read at
+# runtime from SSM Parameter Store (SSH_TUNNEL_KEY_SSM).
+
+FROM node:24-bookworm-slim AS build
+WORKDIR /opt/eisenmail
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json tsconfig.server.json vite.config.ts index.html components.json ./
+COPY public ./public
+COPY src ./src
+RUN npm run build && npm prune --omit=dev
+
+FROM node:24-bookworm-slim
+WORKDIR /opt/eisenmail
+# RDS CA bundle: only needed when connecting straight to RDS with POSTGRES_DB_SSLMODE=verify-full.
+ADD --chmod=644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /opt/eisenmail/global-bundle.pem
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.0 /lambda-adapter /opt/extensions/lambda-adapter
+COPY --from=build /opt/eisenmail/package.json ./
+COPY --from=build /opt/eisenmail/node_modules ./node_modules
+COPY --from=build /opt/eisenmail/build ./build
+COPY --from=build /opt/eisenmail/dist ./dist
+ENV NODE_ENV=production \
+    PORT=8080 \
+    AWS_LWA_PORT=8080 \
+    AWS_LWA_READINESS_CHECK_PATH=/health \
+    AWS_LWA_ENABLE_COMPRESSION=true \
+    NODE_EXTRA_CA_CERTS=/opt/eisenmail/global-bundle.pem
+ARG BUILD_TAG=web
+ENV IMAGE_TAG=$BUILD_TAG
+USER node
+CMD ["node", "build/server/main.js"]

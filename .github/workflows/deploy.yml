@@ -1,0 +1,109 @@
+name: Deploy
+
+# Builds both container images, pushes them to ECR and points the two Lambda functions at them.
+#
+# Security model (see docs/SETUP.md):
+# - No long-lived AWS keys exist anywhere. The job exchanges a GitHub OIDC token for short-lived
+#   credentials of one IAM role, whose trust policy only accepts this repository's `production`
+#   environment. Restrict that environment to the main branch in the repository settings.
+# - The role can push images to one ECR repository and update the code of two functions. It
+#   cannot read mail, files, secrets or change IAM.
+# - Nothing here runs for pull requests.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
+  deploy:
+    name: Build, push, update functions
+    needs: test
+    # Skipped until the AWS side exists (repository variable set in docs/SETUP.md step 4).
+    if: ${{ vars.AWS_DEPLOY_ROLE_ARN != '' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # to request the OIDC token; grants nothing in the repository
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'eisenmail' }}
+      WEB_FUNCTION: ${{ vars.WEB_FUNCTION || 'eisenmail-web' }}
+      INBOX_FUNCTION: ${{ vars.INBOX_FUNCTION || 'eisenmail-inbox' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-deploy-${{ github.run_id }}
+          role-duration-seconds: 1800
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # provenance/sbom attestations are switched off: Lambda needs a plain image manifest.
+      - id: web
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.node
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          build-args: BUILD_TAG=${{ github.sha }}
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:web
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:web-${{ github.sha }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+      - id: inbox
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.python
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          build-args: BUILD_TAG=${{ github.sha }}
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:inbox
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:inbox-${{ github.sha }}
+          cache-from: type=gha,scope=inbox
+          cache-to: type=gha,scope=inbox,mode=max
+
+      - name: Point the functions at the new images
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          INBOX_DIGEST: ${{ steps.inbox.outputs.digest }}
+        run: |
+          set -euo pipefail
+          deploy() { # <function> <image digest>
+            if ! aws lambda get-function --function-name "$1" >/dev/null 2>&1; then
+              echo "::notice::$1 does not exist yet. The image was pushed; create the app stack (docs/SETUP.md step 7) and it will use it."
+              return 0
+            fi
+            aws lambda update-function-code --function-name "$1" --image-uri "${REGISTRY}/${ECR_REPOSITORY}@$2" --no-cli-pager >/dev/null
+            aws lambda wait function-updated-v2 --function-name "$1"
+            echo "$1 now runs $2"
+          }
+          deploy "$WEB_FUNCTION" "$WEB_DIGEST"
+          deploy "$INBOX_FUNCTION" "$INBOX_DIGEST"

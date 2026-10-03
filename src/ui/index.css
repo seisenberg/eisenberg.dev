@@ -1,0 +1,149 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Palette follows macOS: system blue accent, neutral greys, translucent sidebar. */
+:root {
+  --radius: 0.5rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.2 0.005 260);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.005 260);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.005 260);
+  --primary: oklch(0.6 0.2 255);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.96 0.003 260);
+  --secondary-foreground: oklch(0.25 0.005 260);
+  --muted: oklch(0.965 0.003 260);
+  --muted-foreground: oklch(0.52 0.01 260);
+  --accent: oklch(0.95 0.004 260);
+  --accent-foreground: oklch(0.2 0.005 260);
+  --destructive: oklch(0.6 0.23 27);
+  --border: oklch(0.915 0.004 260);
+  --input: oklch(0.89 0.004 260);
+  --ring: oklch(0.6 0.2 255);
+  --sidebar: oklch(0.955 0.004 260);
+  --sidebar-foreground: oklch(0.27 0.005 260);
+  --sidebar-hover: oklch(0.915 0.005 260);
+  --selection: oklch(0.6 0.2 255);
+  --selection-foreground: oklch(1 0 0);
+  --selection-idle: oklch(0.91 0.005 260);
+  --flag: oklch(0.72 0.18 55);
+}
+
+.dark {
+  --background: oklch(0.2 0.004 260);
+  --foreground: oklch(0.94 0.003 260);
+  --card: oklch(0.23 0.004 260);
+  --card-foreground: oklch(0.94 0.003 260);
+  --popover: oklch(0.25 0.005 260);
+  --popover-foreground: oklch(0.94 0.003 260);
+  --primary: oklch(0.62 0.19 255);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.29 0.005 260);
+  --secondary-foreground: oklch(0.94 0.003 260);
+  --muted: oklch(0.27 0.005 260);
+  --muted-foreground: oklch(0.68 0.01 260);
+  --accent: oklch(0.3 0.006 260);
+  --accent-foreground: oklch(0.96 0.003 260);
+  --destructive: oklch(0.65 0.21 25);
+  --border: oklch(1 0 0 / 11%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.62 0.19 255);
+  --sidebar: oklch(0.245 0.005 260);
+  --sidebar-foreground: oklch(0.9 0.003 260);
+  --sidebar-hover: oklch(0.31 0.006 260);
+  --selection: oklch(0.55 0.19 255);
+  --selection-foreground: oklch(1 0 0);
+  --selection-idle: oklch(0.33 0.006 260);
+  --flag: oklch(0.78 0.16 60);
+}
+
+@theme inline {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-hover: var(--sidebar-hover);
+  --color-selection: var(--selection);
+  --color-selection-foreground: var(--selection-foreground);
+  --color-selection-idle: var(--selection-idle);
+  --color-flag: var(--flag);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-size: 13px;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: default;
+  }
+}
+
+/* thin, unobtrusive scrollbars like macOS overlay scrollbars */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--foreground) 22%, transparent) transparent;
+}
+
+/* ---- phones ------------------------------------------------------------------------------- */
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+/* Fill the screen including the area behind the notch / home indicator when installed. */
+.h-app {
+  height: 100dvh;
+}
+.pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+@media (max-width: 767px) {
+  /* iOS zooms the page when a focused field's text is smaller than 16px. */
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+  /* An app, not a page: no rubber-band scrolling of the whole document, no text selection on chrome. */
+  body {
+    overscroll-behavior-y: none;
+  }
+}

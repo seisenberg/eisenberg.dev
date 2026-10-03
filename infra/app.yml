@@ -1,0 +1,326 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  eisenmail application (deploy after bootstrap.yml and after the first images are in the
+  registry): the two Lambda functions, the HTTPS endpoint and the SES receiving rule.
+  Secrets are NOT parameters here; they are read from SSM Parameter Store at runtime.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Mail }
+        Parameters: [MailDomains, ForwardTo, OwnerAddresses, DefaultFrom]
+      - Label: { default: Database }
+        Parameters: [DbHost, DbPort, DbName, DbUser, DbPasswordParameter, DbSslMode]
+      - Label: { default: SSH tunnel to the database host (leave TunnelHost empty for a direct connection) }
+        Parameters: [TunnelHost, TunnelPort, TunnelUser, TunnelKeyParameter, TunnelHostKey]
+      - Label: { default: Web site }
+        Parameters: [DomainName, CertificateArn, TrustedProxyHops]
+      - Label: { default: Push notifications (optional) }
+        Parameters: [VapidPublicKey, VapidPrivateKeyParameter]
+      - Label: { default: Images }
+        Parameters: [ProjectName, WebImageTag, InboxImageTag]
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eisenmail
+  WebImageTag:
+    Type: String
+    Default: web
+    Description: Tag in the registry used when the function is created. GitHub Actions moves the function to newer images afterwards.
+  InboxImageTag:
+    Type: String
+    Default: inbox
+
+  MailDomains:
+    Type: CommaDelimitedList
+    Description: Domains to receive for and send from, e.g. "eisenberg.dev,example-llc.com". Each must be a verified SES identity.
+  ForwardTo:
+    Type: String
+    Description: Your private mailbox. Forwards go here, and replies from it are relayed.
+    AllowedPattern: "^[^@\\s,]+@[^@\\s,]+\\.[^@\\s,]+$"
+  OwnerAddresses:
+    Type: String
+    Default: ""
+    Description: Optional comma list of additional addresses allowed to use the reply relay (default is ForwardTo).
+  DefaultFrom:
+    Type: String
+    Default: ""
+    Description: Optional default From address for new messages in the webmail.
+
+  DbHost:
+    Type: String
+    Default: 127.0.0.1
+    Description: PostgreSQL host. With a tunnel this is the address as seen from the tunnel host (127.0.0.1).
+  DbPort:
+    Type: Number
+    Default: 5432
+  DbName:
+    Type: String
+    Default: emails
+  DbUser:
+    Type: String
+    Default: eisenmail
+  DbPasswordParameter:
+    Type: String
+    Default: /eisenmail/db_password
+    Description: Name of the SSM SecureString holding the database password.
+  DbSslMode:
+    Type: String
+    Default: verify-full
+    AllowedValues: [verify-full, require, disable]
+    Description: Only used for a direct connection (no tunnel).
+
+  TunnelHost:
+    Type: String
+    Default: ""
+    Description: Public DNS name or IP of the database host. Empty means connect directly to DbHost.
+  TunnelPort:
+    Type: Number
+    Default: 22
+  TunnelUser:
+    Type: String
+    Default: tunnel
+  TunnelKeyParameter:
+    Type: String
+    Default: /eisenmail/tunnel_key
+    Description: Name of the SSM SecureString holding the tunnel's private key.
+  TunnelHostKey:
+    Type: String
+    Default: ""
+    Description: The host's public key, e.g. "ssh-ed25519 AAAA..." (printed by infra/db-host.sh). Required with TunnelHost.
+
+  DomainName:
+    Type: String
+    Default: ""
+    Description: Custom domain for the site, e.g. eisenberg.dev. Leave empty to start on the generated API URL.
+  CertificateArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws[a-zA-Z-]*:acm:[a-z0-9-]+:\\d{12}:certificate/.+$"
+    Description: ACM certificate (in this region) covering DomainName. Required with DomainName.
+  TrustedProxyHops:
+    Type: Number
+    Default: 1
+    Description: 1 for API Gateway alone. 2 if you later put CloudFront in front.
+
+  VapidPublicKey:
+    Type: String
+    Default: ""
+    Description: From "npm run push:keys". Empty disables push notifications.
+  VapidPrivateKeyParameter:
+    Type: String
+    Default: /eisenmail/vapid_private_key
+
+Conditions:
+  UseTunnel: !Not [!Equals [!Ref TunnelHost, ""]]
+  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  HasPush: !Not [!Equals [!Ref VapidPublicKey, ""]]
+  HasOwnerAddresses: !Not [!Equals [!Ref OwnerAddresses, ""]]
+  HasDefaultFrom: !Not [!Equals [!Ref DefaultFrom, ""]]
+
+Rules:
+  TunnelNeedsHostKey:
+    RuleCondition: !Not [!Equals [!Ref TunnelHost, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref TunnelHostKey, ""]]
+        AssertDescription: TunnelHostKey is required when TunnelHost is set.
+  DomainNeedsCertificate:
+    RuleCondition: !Not [!Equals [!Ref DomainName, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref CertificateArn, ""]]
+        AssertDescription: CertificateArn is required when DomainName is set.
+
+Resources:
+  # ---- web: Koa behind the Lambda Web Adapter ---------------------------------------------------
+  WebFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: WebLogs
+    Properties:
+      FunctionName: !Sub "${ProjectName}-web"
+      PackageType: Image
+      Code:
+        ImageUri: !Sub
+          - "${Registry}:${WebImageTag}"
+          - Registry: !ImportValue { "Fn::Sub": "${ProjectName}-registry-uri" }
+      Role: !ImportValue { "Fn::Sub": "${ProjectName}-web-role-arn" }
+      Architectures: [x86_64]
+      MemorySize: 1024
+      Timeout: 30
+      Environment:
+        Variables:
+          NODE_ENV: production
+          MAIL_DOMAINS: !Join [",", !Ref MailDomains]
+          DEFAULT_FROM: !If [HasDefaultFrom, !Ref DefaultFrom, !Ref "AWS::NoValue"]
+          PUBLIC_ORIGIN: !If [HasDomain, !Sub "https://${DomainName}", !Ref "AWS::NoValue"]
+          TRUSTED_PROXY_HOPS: !Ref TrustedProxyHops
+          POSTGRES_DB_HOST: !Ref DbHost
+          POSTGRES_DB_PORT: !Ref DbPort
+          POSTGRES_DB_NAME: !Ref DbName
+          POSTGRES_DB_USER: !Ref DbUser
+          POSTGRES_DB_PASSWORD_SSM: !Ref DbPasswordParameter
+          POSTGRES_DB_SSLMODE: !If [UseTunnel, !Ref "AWS::NoValue", !Ref DbSslMode]
+          SSH_TUNNEL_HOST: !If [UseTunnel, !Ref TunnelHost, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_PORT: !If [UseTunnel, !Ref TunnelPort, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_USER: !If [UseTunnel, !Ref TunnelUser, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_KEY_SSM: !If [UseTunnel, !Ref TunnelKeyParameter, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_HOST_KEY: !If [UseTunnel, !Ref TunnelHostKey, !Ref "AWS::NoValue"]
+          MAIL_BUCKET: !ImportValue { "Fn::Sub": "${ProjectName}-mail-bucket" }
+          MAIL_PREFIX: email-inbox/
+          FILES_BUCKET: !ImportValue { "Fn::Sub": "${ProjectName}-files-bucket" }
+          FILES_PREFIX: drop/
+          PUBLIC_FILES_BUCKET: !ImportValue { "Fn::Sub": "${ProjectName}-public-files-bucket" }
+          PUBLIC_FILES_PREFIX: public/
+          VAPID_PUBLIC_KEY: !If [HasPush, !Ref VapidPublicKey, !Ref "AWS::NoValue"]
+          VAPID_PRIVATE_KEY_SSM: !If [HasPush, !Ref VapidPrivateKeyParameter, !Ref "AWS::NoValue"]
+
+  WebLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-web"
+      RetentionInDays: 30
+
+  # ---- HTTPS endpoint: API Gateway HTTP API in front of the web function ------------------------
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Ref ProjectName
+      ProtocolType: HTTP
+      Target: !GetAtt WebFunction.Arn
+      # with a custom domain, the generated execute-api URL is switched off
+      DisableExecuteApiEndpoint: !If [HasDomain, true, false]
+
+  HttpApiThrottle:
+    Type: AWS::ApiGatewayV2::ApiGatewayManagedOverrides
+    Properties:
+      ApiId: !Ref HttpApi
+      Stage:
+        # a cap on what a flood can cost; far above what one person uses
+        DefaultRouteSettings:
+          ThrottlingBurstLimit: 60
+          ThrottlingRateLimit: 20
+
+  HttpApiInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+
+  HttpDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasDomain
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1030] # CertificateArn is empty only when this resource is not created
+    Properties:
+      DomainName: !Ref DomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  HttpDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasDomain
+    DependsOn: HttpApiThrottle
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref HttpDomain
+      Stage: $default
+
+  # ---- inbox: SES receiving -> S3 -> Lambda ---------------------------------------------------------
+  InboxFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: InboxLogs
+    Properties:
+      FunctionName: !Sub "${ProjectName}-inbox"
+      PackageType: Image
+      Code:
+        ImageUri: !Sub
+          - "${Registry}:${InboxImageTag}"
+          - Registry: !ImportValue { "Fn::Sub": "${ProjectName}-registry-uri" }
+      Role: !ImportValue { "Fn::Sub": "${ProjectName}-inbox-role-arn" }
+      Architectures: [x86_64]
+      MemorySize: 1024
+      Timeout: 60
+      Environment:
+        Variables:
+          FORWARD_TO: !Ref ForwardTo
+          OWNER_ADDRESSES: !If [HasOwnerAddresses, !Ref OwnerAddresses, !Ref "AWS::NoValue"]
+          MAIL_DOMAINS: !Join [",", !Ref MailDomains]
+          MAIL_BUCKET: !ImportValue { "Fn::Sub": "${ProjectName}-mail-bucket" }
+          MAIL_PREFIX: email-inbox/
+          POSTGRES_DB_HOST: !Ref DbHost
+          POSTGRES_DB_PORT: !Ref DbPort
+          POSTGRES_DB_NAME: !Ref DbName
+          POSTGRES_DB_USER: !Ref DbUser
+          POSTGRES_DB_PASSWORD_SSM: !Ref DbPasswordParameter
+          POSTGRES_DB_SSLMODE: !If [UseTunnel, !Ref "AWS::NoValue", !Ref DbSslMode]
+          SSH_TUNNEL_HOST: !If [UseTunnel, !Ref TunnelHost, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_PORT: !If [UseTunnel, !Ref TunnelPort, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_USER: !If [UseTunnel, !Ref TunnelUser, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_KEY_SSM: !If [UseTunnel, !Ref TunnelKeyParameter, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_HOST_KEY: !If [UseTunnel, !Ref TunnelHostKey, !Ref "AWS::NoValue"]
+          VAPID_PRIVATE_KEY_SSM: !If [HasPush, !Ref VapidPrivateKeyParameter, !Ref "AWS::NoValue"]
+
+  InboxLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-inbox"
+      RetentionInDays: 30
+
+  InboxInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InboxFunction
+      Action: lambda:InvokeFunction
+      Principal: ses.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  ReceiptRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties:
+      RuleSetName: !Ref ProjectName
+
+  # Catch-all: every address at every listed domain. CloudFormation cannot activate a rule set;
+  # that is one CLI command in docs/SETUP.md.
+  ReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    DependsOn: InboxInvoke
+    Properties:
+      RuleSetName: !Ref ReceiptRuleSet
+      Rule:
+        Name: catch-all
+        Enabled: true
+        ScanEnabled: true
+        TlsPolicy: Optional
+        Recipients: !Ref MailDomains
+        Actions:
+          - S3Action:
+              BucketName: !ImportValue { "Fn::Sub": "${ProjectName}-mail-bucket" }
+              ObjectKeyPrefix: email-inbox/
+          - LambdaAction:
+              FunctionArn: !GetAtt InboxFunction.Arn
+              InvocationType: Event
+
+Outputs:
+  SiteUrl:
+    Description: Where the site answers.
+    Value: !If [HasDomain, !Sub "https://${DomainName}", !GetAtt HttpApi.ApiEndpoint]
+  DnsTarget:
+    Condition: HasDomain
+    Description: Point DomainName at this name (ALIAS/ANAME for an apex domain, CNAME for a subdomain).
+    Value: !GetAtt HttpDomain.RegionalDomainName
+  DnsTargetHostedZoneId:
+    Condition: HasDomain
+    Description: Hosted zone id of DnsTarget, for a Route 53 alias record.
+    Value: !GetAtt HttpDomain.RegionalHostedZoneId
+  ReceiptRuleSetName:
+    Value: !Ref ReceiptRuleSet

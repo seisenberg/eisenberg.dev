@@ -1,0 +1,38 @@
+# Keeps every dependency surface current: npm, Python, the container base images and the pinned
+# GitHub Actions. Minor and patch updates arrive as one grouped pull request per ecosystem per
+# week; majors arrive on their own so they can be read. Security updates are raised immediately.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /py
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]

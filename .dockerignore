@@ -1,0 +1,11 @@
+node_modules
+build
+dist
+.data
+.git
+.env*
+!.env.example
+tunnel_ed25519
+py/.venv
+**/__pycache__
+**/.pytest_cache

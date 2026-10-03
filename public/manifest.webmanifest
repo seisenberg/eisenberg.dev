@@ -1,0 +1,21 @@
+{
+  "name": "Eisenmail",
+  "short_name": "Mail",
+  "description": "Private mail and files",
+  "id": "/mail",
+  "start_url": "/mail",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "New Message", "url": "/mail?compose=1" },
+    { "name": "Files", "url": "/files" }
+  ]
+}
