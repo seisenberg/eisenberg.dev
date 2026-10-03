@@ -216,7 +216,7 @@ def test_success_resets_failure_count(db):
     db.add_subscription(FCM, p256dh="P", auth="A", failure_count=3)
     send = FakeSend(201)
     counts = notifier(send).notify(db, '{"title":"x"}', "eisenberg.dev")
-    assert counts == {"sent": 1, "gone": 0, "failed": 0, "skipped": 0}
+    assert counts == {"sent": 1, "gone": 0, "failed": 0, "skipped": 0, "filtered": 0}
     assert send.calls == [dict(subscription={"endpoint": FCM, "keys": {"p256dh": "P", "auth": "A"}},
                                payload='{"title":"x"}', subject="mailto:postmaster@eisenberg.dev",
                                ttl=86400, timeout=5.0)]
@@ -234,7 +234,7 @@ def test_gone_subscription_is_deleted(db, status):
     db.add_subscription(FCM)
     db.add_subscription(APPLE, failure_count=1)
     counts = notifier(FakeSend(status, 201)).notify(db, "{}", "d")
-    assert counts == {"sent": 1, "gone": 1, "failed": 0, "skipped": 0}
+    assert counts == {"sent": 1, "gone": 1, "failed": 0, "skipped": 0, "filtered": 0}
     assert list(db.push_subscriptions) == [APPLE]
 
 
@@ -245,7 +245,7 @@ def test_other_failures_increment_failure_count(db, answer, caplog):
     db.add_subscription(MOZILLA, failure_count=5)
     with caplog.at_level(logging.DEBUG, logger="eisenmail.push"):
         counts = notifier(FakeSend(answer, 201)).notify(db, '{"body":"PAYLOAD-TEXT"}', "d")
-    assert counts == {"sent": 1, "gone": 0, "failed": 1, "skipped": 0}
+    assert counts == {"sent": 1, "gone": 0, "failed": 1, "skipped": 0, "filtered": 0}
     assert db.push_subscriptions[FCM]["failure_count"] == 3 and db.push_subscriptions[FCM]["last_success_at"] is None
     assert db.push_subscriptions[MOZILLA]["failure_count"] == 0
     assert "fcm.googleapis.com" in caplog.text
@@ -267,7 +267,7 @@ def test_disallowed_endpoints_are_never_requested(db, endpoint, caplog):
     with caplog.at_level(logging.WARNING, logger="eisenmail.push"):
         counts = notifier(send).notify(db, "{}", "d")
     assert send.endpoints == [FCM]
-    assert counts == {"sent": 1, "gone": 0, "failed": 0, "skipped": 1}
+    assert counts == {"sent": 1, "gone": 0, "failed": 0, "skipped": 1, "filtered": 0}
     assert db.push_subscriptions[endpoint]["failure_count"] == 0          # untouched: not ours to judge
     assert "skipped" in caplog.text and "/hook" not in caplog.text and "meta-data" not in caplog.text
 
@@ -281,8 +281,9 @@ def test_push_endpoint_allow_extends_the_list_but_not_to_http(db):
 
 
 def test_time_budget_skips_the_remaining_subscriptions(db):
+    db.add_user(2, role="owner")
     for i in range(6):
-        db.add_subscription(f"https://fcm.googleapis.com/fcm/send/{i}")
+        db.add_subscription(f"https://fcm.googleapis.com/fcm/send/{i}", user_id=1 + i % 2)
     now = [100.0]
 
     def slow_send(subscription, payload, *, subject, ttl, timeout):
@@ -292,22 +293,59 @@ def test_time_budget_skips_the_remaining_subscriptions(db):
 
     timeouts = []
     counts = notifier(slow_send, clock=lambda: now[0]).notify(db, "{}", "d")
-    assert counts == {"sent": 3, "gone": 0, "failed": 0, "skipped": 3}
+    assert counts == {"sent": 3, "gone": 0, "failed": 0, "skipped": 3, "filtered": 0}
     assert timeouts == [5.0, 5.0, 2.0]                  # the last request only gets what is left of the 12 s
     assert sum(1 for s in db.push_subscriptions.values() if s["last_success_at"]) == 3
 
 
-def test_at_most_twenty_subscriptions_per_message(db):
+def test_at_most_five_subscriptions_per_user(db):
     for i in range(25):
         db.add_subscription(f"https://fcm.googleapis.com/fcm/send/{i:02d}")
     send = FakeSend()
-    assert notifier(send).notify(db, "{}", "d")["sent"] == 20
-    assert len(send.calls) == 20
+    assert notifier(send).notify(db, "{}", "d")["sent"] == push.MAX_PER_USER == 5
+    assert len(send.calls) == 5
+
+
+def test_overall_ceiling_per_message(db):
+    for user in range(2, 12):                            # ten more owners with five devices each
+        db.add_user(user, role="owner")
+        for i in range(5):
+            db.add_subscription(f"https://fcm.googleapis.com/fcm/send/u{user}-{i}", user_id=user)
+    send = FakeSend()
+    assert notifier(send).notify(db, "{}", "d")["sent"] == push.MAX_SUBSCRIPTIONS == 40
+
+
+def test_a_member_with_many_devices_cannot_crowd_out_the_owner(db):
+    # the member's subscriptions are all healthy and plentiful; the owner's one device has failed before
+    db.add_user(2, role="member", domains=["shop.example"])
+    for i in range(30):
+        db.add_subscription(f"https://fcm.googleapis.com/fcm/send/member-{i:02d}", user_id=2)
+    db.add_subscription("https://web.push.apple.com/owner-phone", failure_count=3)
+    send = FakeSend()
+    counts = notifier(send).notify(db, "{}", "d", recipient_domains={"shop.example"})
+    assert "https://web.push.apple.com/owner-phone" in send.endpoints
+    assert counts["sent"] == 1 + 5                       # the owner's device and the member's best five
+    # ... and for mail the member may not see, only the owner is notified
+    send = FakeSend()
+    counts = notifier(send).notify(db, "{}", "d", recipient_domains={"eisenberg.dev"})
+    assert send.endpoints == ["https://web.push.apple.com/owner-phone"]
+    assert counts["filtered"] == 5
+
+
+def test_payload_function_can_depend_on_the_subscriber_scope(db):
+    db.add_user(2, role="member", domains=["shop.example"])
+    db.add_subscription("https://fcm.googleapis.com/fcm/send/owner")
+    db.add_subscription("https://fcm.googleapis.com/fcm/send/member", user_id=2)
+    send = FakeSend()
+    notifier(send).notify(db, lambda badge, scope: json.dumps({"scope": sorted(scope) if scope else None}), "d",
+                          recipient_domains={"shop.example", "eisenberg.dev"})
+    seen = {call["subscription"]["endpoint"].rsplit("/", 1)[1]: json.loads(call["payload"])["scope"] for call in send.calls}
+    assert seen == {"owner": None, "member": ["shop.example"]}
 
 
 def test_no_subscriptions_is_a_no_op(db):
     send = FakeSend()
-    assert notifier(send).notify(db, "{}", "d") == {"sent": 0, "gone": 0, "failed": 0, "skipped": 0}
+    assert notifier(send).notify(db, "{}", "d") == {"sent": 0, "gone": 0, "failed": 0, "skipped": 0, "filtered": 0}
     assert send.calls == []
 
 
@@ -328,7 +366,7 @@ def test_unusable_key_sends_nothing_and_blames_no_subscription(db, caplog):
     notifier_._send._session = made_requests                        # would blow up if it were ever used
     with caplog.at_level(logging.ERROR, logger="eisenmail.push"):
         counts = notifier_.notify(db, "{}", "d")
-    assert counts == {"sent": 0, "gone": 0, "failed": 0, "skipped": 2}
+    assert counts == {"sent": 0, "gone": 0, "failed": 0, "skipped": 2, "filtered": 0}
     assert all(s["failure_count"] == 0 for s in db.push_subscriptions.values())
     assert "unavailable" in caplog.text
 
@@ -428,7 +466,7 @@ def test_real_pywebpush_request(service, db):
 
     counts = real_notifier().notify(db, payload, "eisenberg.dev")
 
-    assert counts == {"sent": 1, "gone": 0, "failed": 0, "skipped": 0}
+    assert counts == {"sent": 1, "gone": 0, "failed": 0, "skipped": 0, "filtered": 0}
     assert db.push_subscriptions[endpoint]["failure_count"] == 0
     assert db.push_subscriptions[endpoint]["last_success_at"] == "now"
     (request,) = service.requests
@@ -474,7 +512,7 @@ def test_real_statuses_and_no_redirect_following(service, db):
 
     counts = real_notifier().notify(db, '{"title":"x"}', "eisenberg.dev")
 
-    assert counts == {"sent": 1, "gone": 2, "failed": 2, "skipped": 0}
+    assert counts == {"sent": 1, "gone": 2, "failed": 2, "skipped": 0, "filtered": 0}
     assert sorted(db.push_subscriptions) == sorted([subscribers["broken"], subscribers["moved"], subscribers["fine"]])
     assert db.push_subscriptions[subscribers["broken"]]["failure_count"] == 1
     assert db.push_subscriptions[subscribers["moved"]]["failure_count"] == 1
@@ -493,7 +531,7 @@ def test_real_timeout_counts_as_failure(service, db, monkeypatch):
     started = time.monotonic()
     counts = real_notifier().notify(db, "{}", "eisenberg.dev")
     assert time.monotonic() - started < 1.4
-    assert counts == {"sent": 0, "gone": 0, "failed": 1, "skipped": 0}
+    assert counts == {"sent": 0, "gone": 0, "failed": 1, "skipped": 0, "filtered": 0}
     assert db.push_subscriptions[endpoint]["failure_count"] == 1
 
 
@@ -501,7 +539,7 @@ def test_real_sender_with_garbage_subscriber_keys_is_a_failure_not_a_crash(servi
     endpoint = f"http://127.0.0.1:{service.port}/push/garbage"
     db.add_subscription(endpoint, p256dh="not-a-key", auth="x")
     counts = real_notifier().notify(db, "{}", "eisenberg.dev")
-    assert counts == {"sent": 0, "gone": 0, "failed": 1, "skipped": 0}
+    assert counts == {"sent": 0, "gone": 0, "failed": 1, "skipped": 0, "filtered": 0}
     assert service.requests == [] and db.push_subscriptions[endpoint]["failure_count"] == 1
 
 
@@ -530,7 +568,7 @@ def test_module_and_handler_import_without_pywebpush_installed():
         "from config import PushConfig\n"
         "sent = []\n"
         "class DB:\n"
-        "    def list_push_subscriptions(self, limit): return [dict(endpoint='https://fcm.googleapis.com/x', p256dh='p', auth='a')]\n"
+        "    def list_push_subscriptions(self, limit, per_user): return [dict(endpoint='https://fcm.googleapis.com/x', p256dh='p', auth='a', role='owner', domains=None)]\n"
         "    def push_succeeded(self, endpoint): sent.append(endpoint)\n"
         f"n = push.PushNotifier(PushConfig(vapid_private_key='{VAPID_KEY}'), send=lambda *a, **k: 201)\n"
         "assert n.notify(DB(), '{}', 'd')['sent'] == 1 and sent\n"
@@ -538,3 +576,40 @@ def test_module_and_handler_import_without_pywebpush_installed():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     result = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+# ------------------------------------------------------------------------------------------
+# badge and per-user visibility (notifier level)
+# ------------------------------------------------------------------------------------------
+def test_payload_badge():
+    msg = relay.parse(simple_message())
+    assert "badge" not in json.loads(push.build_payload(msg, ALIAS, "id"))
+    assert json.loads(push.build_payload(msg, ALIAS, "id", 0))["badge"] == 0
+    assert json.loads(push.build_payload(msg, ALIAS, "id", 7))["badge"] == 7
+    assert json.loads(push.build_payload(msg, ALIAS, "id", 123456))["badge"] == 9999
+    assert json.loads(push.build_payload(msg, ALIAS, "id", -3))["badge"] == 0
+
+
+def test_scoped_notify_counts_and_payloads(db):
+    db.add_user(2, role="member", domains=["Shop.Example"])
+    db.add_user(3, role="member", domains=["other.example"])
+    db.add_subscription(FCM, user_id=1)
+    db.add_subscription(APPLE, user_id=2)
+    db.add_subscription(MOZILLA, user_id=3)
+    db.add_subscription(WINDOWS, user_id=42)                      # no such user
+    db.indexed_unread = [["shop.example"], ["eisenberg.dev"], ["other.example"]]
+    send = FakeSend()
+    counts = notifier(send).notify(db, lambda badge: json.dumps({"badge": badge}), "d",
+                                   recipient_domains=["SHOP.example", "eisenberg.dev"])
+    assert counts == {"sent": 2, "gone": 0, "failed": 0, "skipped": 0, "filtered": 1}
+    assert {c["subscription"]["endpoint"]: json.loads(c["payload"]) for c in send.calls} == {
+        FCM: {"badge": 3}, APPLE: {"badge": 1}}
+    assert WINDOWS not in db.push_subscriptions and MOZILLA in db.push_subscriptions
+    assert db.push_subscriptions[MOZILLA]["failure_count"] == 0
+
+
+def test_member_is_filtered_when_the_message_domains_are_unknown(db):
+    db.add_user(2, role="member", domains=["shop.example"])
+    db.add_subscription(APPLE, user_id=2)
+    send = FakeSend()
+    assert notifier(send).notify(db, "{}", "d")["filtered"] == 1 and send.calls == []

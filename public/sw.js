@@ -26,8 +26,12 @@ self.addEventListener('push', (event) => {
     data: { url: safePath(data.url) },
   };
   const work = [self.registration.showNotification(title, options)];
-  // A dot on the home screen icon; the app replaces it with the real unread count when opened.
-  if (self.navigator.setAppBadge) work.push(self.navigator.setAppBadge().catch(() => {}));
+  // The unread count on the home screen icon. The server sends it with the notification; without
+  // one, show a plain dot. The app sets the exact number again whenever it is opened.
+  if (self.navigator.setAppBadge) {
+    const count = Number.isInteger(data.badge) && data.badge > 0 ? data.badge : undefined;
+    work.push(self.navigator.setAppBadge(count).catch(() => {}));
+  }
   event.waitUntil(Promise.all(work));
 });
 

@@ -26,6 +26,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1146.0",
     "@koa/bodyparser": "^6.1.0",
     "@koa/router": "^15.7.0",
+    "@simplewebauthn/server": "^14.0.3",
     "cn": "^0.4.0",
     "koa": "^3.2.1",
     "mailparser": "^3.9.33",
@@ -36,6 +37,7 @@
     "web-push": "^3.6.7"
   },
   "devDependencies": {
+    "@simplewebauthn/browser": "^14.0.0",
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/react-query": "^5.104.1",
     "@types/koa": "^3.0.3",

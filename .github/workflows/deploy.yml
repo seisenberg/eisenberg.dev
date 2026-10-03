@@ -6,8 +6,9 @@ name: Deploy
 # - No long-lived AWS keys exist anywhere. The job exchanges a GitHub OIDC token for short-lived
 #   credentials of one IAM role, whose trust policy only accepts this repository's `production`
 #   environment. Restrict that environment to the main branch in the repository settings.
-# - The role can push images to one ECR repository and update the code of two functions. It
-#   cannot read mail, files, secrets or change IAM.
+# - The role can push images to one ECR repository, update the code of two functions and call the
+#   web function (for the health check after an update). It cannot read mail, files, secrets or
+#   change IAM.
 # - Nothing here runs for pull requests.
 on:
   push:
@@ -89,21 +90,76 @@ jobs:
           cache-from: type=gha,scope=inbox
           cache-to: type=gha,scope=inbox,mode=max
 
+      # Order matters. The web function goes first and is called once: that first start brings
+      # the database schema up to date. Only then does the inbox function get code that may
+      # rely on the new schema.
       - name: Point the functions at the new images
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           WEB_DIGEST: ${{ steps.web.outputs.digest }}
           INBOX_DIGEST: ${{ steps.inbox.outputs.digest }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          deploy() { # <function> <image digest>
-            if ! aws lambda get-function --function-name "$1" >/dev/null 2>&1; then
-              echo "::notice::$1 does not exist yet. The image was pushed; create the app stack (docs/SETUP.md step 7) and it will use it."
-              return 0
-            fi
+          exists() { aws lambda get-function --function-name "$1" >/dev/null 2>&1; }
+          not_yet() {
+            echo "::notice::$1 does not exist yet. The image was pushed; create the app stack (docs/SETUP.md step 7) and it will use it."
+          }
+          update() { # <function> <image digest>
             aws lambda update-function-code --function-name "$1" --image-uri "${REGISTRY}/${ECR_REPOSITORY}@$2" --no-cli-pager >/dev/null
             aws lambda wait function-updated-v2 --function-name "$1"
             echo "$1 now runs $2"
           }
-          deploy "$WEB_FUNCTION" "$WEB_DIGEST"
-          deploy "$INBOX_FUNCTION" "$INBOX_DIGEST"
+          # One request for GET /api/health, shaped the way API Gateway (HTTP API, payload
+          # format 2.0) sends it. The reply's body is not printed: this log is public.
+          health_check() { # <function>
+            local event="$RUNNER_TEMP/health-event.json" reply="$RUNNER_TEMP/health-reply.json" error status
+            cat > "$event" <<JSON
+          {
+            "version": "2.0",
+            "routeKey": "\$default",
+            "rawPath": "/api/health",
+            "rawQueryString": "",
+            "headers": { "host": "deploy.invalid", "user-agent": "eisenmail-deploy" },
+            "requestContext": {
+              "accountId": "anonymous",
+              "apiId": "deploy",
+              "domainName": "deploy.invalid",
+              "domainPrefix": "deploy",
+              "http": {
+                "method": "GET",
+                "path": "/api/health",
+                "protocol": "HTTP/1.1",
+                "sourceIp": "127.0.0.1",
+                "userAgent": "eisenmail-deploy"
+              },
+              "requestId": "deploy-${RUN_ID}",
+              "routeKey": "\$default",
+              "stage": "\$default",
+              "time": "$(date -u +%d/%b/%Y:%H:%M:%S) +0000",
+              "timeEpoch": $(date +%s)000
+            },
+            "isBase64Encoded": false
+          }
+          JSON
+            error=$(aws lambda invoke --function-name "$1" --payload "fileb://$event" \
+              --cli-read-timeout 90 --query FunctionError --output text --no-cli-pager "$reply")
+            status=$(jq -r '.statusCode // "none"' "$reply")
+            if [[ $error != None || $status != 200 ]]; then
+              echo "::error::$1 did not pass its health check after the update (function error: $error, status code: $status). The inbox function was left on its previous image. Look at the log group /aws/lambda/$1."
+              exit 1
+            fi
+            echo "$1 answered GET /api/health with 200"
+          }
+
+          if exists "$WEB_FUNCTION"; then
+            update "$WEB_FUNCTION" "$WEB_DIGEST"
+            health_check "$WEB_FUNCTION"
+          else
+            not_yet "$WEB_FUNCTION"
+          fi
+          if exists "$INBOX_FUNCTION"; then
+            update "$INBOX_FUNCTION" "$INBOX_DIGEST"
+          else
+            not_yet "$INBOX_FUNCTION"
+          fi

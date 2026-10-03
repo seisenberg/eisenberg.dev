@@ -8,10 +8,14 @@ import { query } from './db.js';
 import { ingestPending } from './ingest.js';
 import * as mail from './mail.js';
 import { HttpError } from './mail.js';
+import { schemaState } from './schema.js';
 import { sendMail } from './send.js';
 import * as rules from './rules.js';
 import * as push from './push.js';
-import { checkName, deleteMailObjects, disposition, fileStore, localPath, localWrite, visibilityOf } from './files.js';
+import * as settings from './settings.js';
+import * as users from './users.js';
+import * as passkeys from './passkeys.js';
+import { checkName, deleteMailObjects, DIRECT_DOWNLOAD_LIMIT, disposition, fileStore, localPath, localWrite, stageDownload, visibilityOf } from './files.js';
 import type { FileListing, MailboxView } from '../shared/api.js';
 
 export interface AppOptions {
@@ -49,11 +53,22 @@ function contentSecurityPolicy(dev: boolean): string {
 
 const SAFE_DOWNLOAD_TYPES = /^(image\/(png|jpeg|gif|webp)|application\/pdf|text\/plain)$/;
 
-function sendDownload(ctx: Koa.Context, d: mail.Download): void {
-  // Mail attachments are attacker supplied. Always a download, never rendered in this origin.
-  ctx.set('Content-Disposition', disposition(d.filename, false));
+/**
+ * Mail attachments are attacker supplied. They are always a download, never rendered in this
+ * origin, with one exception: `inline` shows a plain raster image (png, jpeg, gif, webp) so the
+ * reader can preview it. Anything above Lambda's response limit goes out as a signed S3 link.
+ */
+async function sendDownload(ctx: Koa.Context, d: mail.Download, inline = false): Promise<void> {
+  const preview = inline && mail.PREVIEW_TYPES.test(d.contentType);
+  if (!preview && d.content.length > DIRECT_DOWNLOAD_LIMIT) {
+    const url = await stageDownload(d.filename, d.content);
+    if (url) return ctx.redirect(url);
+    if (config.production) throw new HttpError(413, 'This attachment is too large to download here', 'too_large');
+  }
+  ctx.set('Content-Disposition', disposition(d.filename, preview));
   ctx.set('Content-Security-Policy', "sandbox; default-src 'none'");
-  ctx.type = SAFE_DOWNLOAD_TYPES.test(d.contentType) ? d.contentType : 'application/octet-stream';
+  ctx.set('Cache-Control', 'private, no-store');
+  ctx.type = preview || SAFE_DOWNLOAD_TYPES.test(d.contentType) ? d.contentType : 'application/octet-stream';
   ctx.body = d.content;
 }
 
@@ -104,6 +119,8 @@ export function createApp(options: AppOptions = {}): Koa {
   router.get('/api/health', async (ctx) => {
     try {
       await query('select 1');
+      // a start-up migration that failed must stop a deploy from continuing
+      if (schemaState === 'failed') throw new Error('schema');
       ctx.body = { ok: true };
     } catch {
       ctx.status = 503;
@@ -132,6 +149,8 @@ export function createApp(options: AppOptions = {}): Koa {
   const api = new Router({ prefix: '/api' });
   api.use(auth.requireSameOrigin);
   api.post('/auth/login', auth.login);
+  api.post('/auth/passkey/login-options', passkeys.loginOptions);
+  api.post('/auth/passkey/login', passkeys.login);
 
   const priv = new Router();
   priv.use(auth.requireAuth);
@@ -143,19 +162,50 @@ export function createApp(options: AppOptions = {}): Koa {
   priv.post('/auth/totp/setup', auth.totpSetup);
   priv.post('/auth/totp/enable', auth.totpEnable);
   priv.post('/auth/totp/disable', auth.totpDisable);
+  priv.post('/auth/recovery-codes', auth.regenerateRecoveryCodes);
+  priv.get('/auth/passkeys', passkeys.list);
+  priv.post('/auth/passkeys/register-options', passkeys.registerOptions);
+  priv.post('/auth/passkeys/register', passkeys.register);
+  priv.post('/auth/passkeys/delete', passkeys.remove);
+
+  // ---- users (owner) ---------------------------------------------------------------------------
+  priv.get('/users', auth.requireOwner, async (ctx) => {
+    ctx.body = await users.listUsers();
+  });
+  priv.post('/users', auth.requireOwner, async (ctx) => {
+    await users.createMember((ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
+  priv.post('/users/update', auth.requireOwner, async (ctx) => {
+    await users.updateMember((ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
+  priv.post('/users/delete', auth.requireOwner, async (ctx) => {
+    await users.deleteMember(ctx, (ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
 
   // ---- mail ------------------------------------------------------------------------------------
+  const viewer = auth.viewerOf;
+  const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
   priv.get('/mail/mailboxes', async (ctx) => {
     await ingestPending().catch((err) => console.error(`ingest failed: ${err.message}`));
-    ctx.body = await mail.mailboxTree();
+    // retention: at most once a day, whoever happens to open the webmail
+    await mail
+      .purgeExpired()
+      .then((d) => deleteMailObjects(d.s3Keys))
+      .catch((err) => console.error(`purge failed: ${err.message}`));
+    ctx.body = await mail.mailboxTree(viewer(ctx));
   });
   priv.get('/mail/identities', async (ctx) => {
-    ctx.body = await mail.identities();
+    ctx.body = await mail.identities(viewer(ctx));
+  });
+  priv.get('/mail/contacts', async (ctx) => {
+    ctx.body = await mail.contacts(viewer(ctx), one(ctx.query.q));
   });
   priv.get('/mail/messages', async (ctx) => {
     const q = ctx.query;
-    const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
-    ctx.body = await mail.listMessages({
+    ctx.body = await mail.listMessages(viewer(ctx), {
       mailbox: (one(q.mailbox) ?? 'inbox') as MailboxView,
       domain: one(q.domain),
       address: one(q.address),
@@ -165,45 +215,81 @@ export function createApp(options: AppOptions = {}): Koa {
     });
   });
   priv.get('/mail/messages/:id', async (ctx) => {
-    ctx.body = await mail.getMessage(ctx.params.id);
+    ctx.body = await mail.getMessage(viewer(ctx), ctx.params.id);
   });
   priv.get('/mail/messages/:id/attachments/:index', async (ctx) => {
-    sendDownload(ctx, await mail.getAttachment(ctx.params.id, ctx.params.index));
+    await sendDownload(ctx, await mail.getAttachment(viewer(ctx), ctx.params.id, ctx.params.index), one(ctx.query.inline) === '1');
   });
   priv.get('/mail/messages/:id/raw', async (ctx) => {
-    const raw = await mail.getRaw(ctx.params.id);
-    sendDownload(ctx, { ...raw, contentType: 'application/octet-stream' });
+    const raw = await mail.getRaw(viewer(ctx), ctx.params.id);
+    await sendDownload(ctx, { ...raw, contentType: 'application/octet-stream' });
   });
   priv.patch('/mail/messages', async (ctx) => {
-    ctx.body = { changed: await mail.patchMessages(ctx.request.body as never) };
+    ctx.body = { changed: await mail.patchMessages(viewer(ctx), ctx.request.body as never) };
+  });
+  priv.post('/mail/mark-read', async (ctx) => {
+    const b = (ctx.request.body ?? {}) as Record<string, unknown>;
+    ctx.body = { changed: await mail.markAllRead(viewer(ctx), { mailbox: String(b.mailbox ?? 'inbox') as MailboxView, domain: typeof b.domain === 'string' ? b.domain : undefined, address: typeof b.address === 'string' ? b.address : undefined }) };
   });
   priv.post('/mail/messages/delete', async (ctx) => {
-    const { deleted, s3Keys } = await mail.deleteForever((ctx.request.body as { ids?: unknown })?.ids);
+    const { deleted, s3Keys } = await mail.deleteForever(viewer(ctx), (ctx.request.body as { ids?: unknown })?.ids);
     await deleteMailObjects(s3Keys);
     ctx.body = { deleted };
   });
   priv.post('/mail/empty', async (ctx) => {
-    const { deleted, s3Keys } = await mail.emptyMailbox((ctx.request.body as { mailbox?: unknown })?.mailbox);
+    const { deleted, s3Keys } = await mail.emptyMailbox(viewer(ctx), (ctx.request.body as { mailbox?: unknown })?.mailbox);
     await deleteMailObjects(s3Keys);
     ctx.body = { deleted };
   });
   priv.post('/mail/send', async (ctx) => {
-    ctx.body = await sendMail(ctx.request.body as never);
+    ctx.body = await sendMail(viewer(ctx), ctx.request.body as never);
+  });
+
+  // ---- drafts, settings, filters -----------------------------------------------------------------
+  priv.get('/mail/drafts', async (ctx) => {
+    ctx.body = await settings.listDrafts(viewer(ctx));
+  });
+  priv.post('/mail/drafts', async (ctx) => {
+    await settings.saveDraft(viewer(ctx), (ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
+  priv.post('/mail/drafts/delete', async (ctx) => {
+    await settings.deleteDraft(viewer(ctx), (ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
+  priv.get('/mail/settings', async (ctx) => {
+    ctx.body = await settings.getSettings(viewer(ctx));
+  });
+  priv.post('/mail/settings', async (ctx) => {
+    await settings.setSettings(viewer(ctx), (ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
+  priv.post('/mail/filters', auth.requireOwner, async (ctx) => {
+    await settings.addFilter((ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
+  priv.post('/mail/filters/update', auth.requireOwner, async (ctx) => {
+    await settings.updateFilter((ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
+  priv.post('/mail/filters/delete', auth.requireOwner, async (ctx) => {
+    await settings.deleteFilter((ctx.request.body ?? {}) as never);
+    ctx.status = 204;
   });
 
   // ---- delivery rules (forwarding / notifications per receiving address) -----------------------
   priv.get('/mail/rules', async (ctx) => {
-    ctx.body = await rules.getRules();
+    ctx.body = await rules.getRules(viewer(ctx));
   });
   priv.post('/mail/rules', async (ctx) => {
-    await rules.setRule((ctx.request.body ?? {}) as never);
+    await rules.setRule(viewer(ctx), (ctx.request.body ?? {}) as never);
     ctx.status = 204;
   });
   priv.post('/mail/rules/reset', async (ctx) => {
-    await rules.resetRule((ctx.request.body ?? {}) as never);
+    await rules.resetRule(viewer(ctx), (ctx.request.body ?? {}) as never);
     ctx.status = 204;
   });
-  priv.post('/mail/rules/defaults', async (ctx) => {
+  priv.post('/mail/rules/defaults', auth.requireOwner, async (ctx) => {
     await rules.setDefaults((ctx.request.body ?? {}) as never);
     ctx.status = 204;
   });
@@ -231,13 +317,13 @@ export function createApp(options: AppOptions = {}): Koa {
     if (!s) throw new HttpError(503, 'File storage is not configured (set FILES_BUCKET)', 'files_disabled');
     return s;
   };
-  priv.get('/files', async (ctx) => {
+  priv.get('/files', auth.requireOwner, async (ctx) => {
     const s = fileStore();
     const files = s ? await s.list() : [];
     files.sort((a, b) => b.modified.localeCompare(a.modified));
     ctx.body = { files, maxBytes: config.files.maxBytes, enabled: !!s } satisfies FileListing & { enabled: boolean };
   });
-  priv.post('/files/uploads', async (ctx) => {
+  priv.post('/files/uploads', auth.requireOwner, async (ctx) => {
     const body = (ctx.request.body ?? {}) as Record<string, unknown>;
     const name = checkName(body.name);
     const size = Number(body.size);
@@ -247,28 +333,28 @@ export function createApp(options: AppOptions = {}): Koa {
     const type = typeof body.contentType === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(body.contentType) ? body.contentType : 'application/octet-stream';
     ctx.body = await store().uploadTicket(name, size, type);
   });
-  priv.get('/files/download/:visibility/:name', async (ctx) => {
+  priv.get('/files/download/:visibility/:name', auth.requireOwner, async (ctx) => {
     const url = await store().downloadUrl(checkName(ctx.params.name), visibilityOf(ctx.params.visibility));
     if (!url) throw new HttpError(404, 'File not found');
     ctx.redirect(url);
   });
-  priv.post('/files/visibility', async (ctx) => {
+  priv.post('/files/visibility', auth.requireOwner, async (ctx) => {
     const body = (ctx.request.body ?? {}) as Record<string, unknown>;
     const makePublic = body.public === true;
     await store().setVisibility(checkName(body.name), makePublic ? 'private' : 'public', makePublic ? 'public' : 'private');
     ctx.status = 204;
   });
-  priv.post('/files/delete', async (ctx) => {
+  priv.post('/files/delete', auth.requireOwner, async (ctx) => {
     const body = (ctx.request.body ?? {}) as Record<string, unknown>;
     await store().remove(checkName(body.name), visibilityOf(body.visibility));
     ctx.status = 204;
   });
   if (config.files.driver === 'local') {
-    priv.put('/files/local-upload/:name', async (ctx) => {
+    priv.put('/files/local-upload/:name', auth.requireOwner, async (ctx) => {
       await localWrite(checkName(ctx.params.name), ctx.req, config.files.maxBytes);
       ctx.status = 204;
     });
-    priv.get('/files/local-download/:visibility/:name', async (ctx) => {
+    priv.get('/files/local-download/:visibility/:name', auth.requireOwner, async (ctx) => {
       const name = checkName(ctx.params.name);
       const file = localPath(name, visibilityOf(ctx.params.visibility));
       if (!fs.existsSync(file)) throw new HttpError(404, 'File not found');

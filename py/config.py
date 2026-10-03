@@ -30,6 +30,8 @@ Optional
     VAPID_SUBJECT           "mailto:..." or "https://..." contact for the push services
                             (default mailto:postmaster@<first MAIL_DOMAINS entry, else alias domain>)
     PUSH_ENDPOINT_ALLOW     comma list of extra allowed push host suffixes (tests / self-hosted)
+    RECONCILE_MAX_AGE_HOURS scheduled replay looks at stored mail up to this old (default 72)
+    RECONCILE_BATCH         at most this many messages are replayed per run (default 25)
 
 No longer a setting: FORWARD_STYLE. The forward layout is a per-address rule now
 (address_rules.forward_style, default from mail_settings.default_forward_style, edited in the
@@ -120,6 +122,8 @@ class Config:
     db: Optional[DbConfig] = None
     tunnel: Optional[TunnelConfig] = None
     push: Optional[PushConfig] = None
+    reconcile_max_age_hours: int = 72
+    reconcile_batch: int = 25
 
     def __post_init__(self):
         if not self.forward_to:
@@ -171,6 +175,19 @@ def _port(env: Mapping[str, str], name: str, default: int) -> int:
     if not 0 < port < 65536:
         raise ConfigError(f"{name} must be a port number")
     return port
+
+
+def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = _optional(env, name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ConfigError(f"{name} must be a positive whole number") from None
+    if value < 1:
+        raise ConfigError(f"{name} must be a positive whole number")
+    return value
 
 
 def _addresses(env: Mapping[str, str], name: str, required: bool) -> Tuple[str, ...]:
@@ -264,4 +281,6 @@ def load(env: Optional[Mapping[str, str]] = None) -> Config:
         db=db,
         tunnel=tunnel,
         push=push,
+        reconcile_max_age_hours=_positive_int(env, "RECONCILE_MAX_AGE_HOURS", 72),
+        reconcile_batch=_positive_int(env, "RECONCILE_BATCH", 25),
     )

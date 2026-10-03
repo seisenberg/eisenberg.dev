@@ -92,6 +92,12 @@ Resources:
                 Resource:
                   - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-web"
                   - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-inbox"
+              # After updating the web function the deploy calls its health route once. That first
+              # start applies any database schema change before the inbox function gets new code.
+              - Sid: WarmUpWebFunction
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-web"
 
   # ---- container registry -------------------------------------------------------------------------
   Registry:
@@ -182,6 +188,15 @@ Resources:
             Status: Enabled
             NoncurrentVersionExpiration: { NoncurrentDays: 30 }
             AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+            ExpiredObjectDeleteMarker: true
+          # tmp/ is where the web function stages a large attachment for download. Nothing there
+          # is needed for more than minutes. (The bucket is versioned, so both halves are needed:
+          # the first hides the object after a day, the second removes it for good a day later.)
+          - Id: expire-staged-downloads
+            Status: Enabled
+            Prefix: tmp/
+            ExpirationInDays: 1
+            NoncurrentVersionExpiration: { NoncurrentDays: 1 }
       CorsConfiguration:
         CorsRules:
           # the browser uploads straight to S3 with a presigned URL
@@ -267,6 +282,10 @@ Resources:
                 Resource:
                   - !Sub "${FilesBucket.Arn}/drop/*"
                   - !Sub "${PublicFilesBucket.Arn}/public/*"
+              - Sid: StagedAttachmentDownloads
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub "${FilesBucket.Arn}/tmp/*"
               - Sid: FileDropList
                 Effect: Allow
                 Action: s3:ListBucket
@@ -301,6 +320,14 @@ Resources:
                 Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub "${MailBucket.Arn}/email-inbox/*"
+              # the scheduled reconcile run lists recent raw mail to find messages it never saw
+              - Sid: ListIncomingMail
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt MailBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: ["email-inbox/*"]
               - Sid: ForwardRelayBounce
                 Effect: Allow
                 Action: [ses:SendRawEmail, ses:SendBounce]

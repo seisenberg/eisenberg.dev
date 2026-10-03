@@ -148,6 +148,11 @@ function MessageRow({
           <div className="min-w-0 flex-1">
             <div className="flex items-baseline gap-2">
               <span className={cn("min-w-0 flex-1 truncate text-[13px] max-md:text-[17px]", m.isRead ? "font-medium" : "font-bold")}>{who}</span>
+              {m.threadCount > 1 && (
+                <span aria-label={`${m.threadCount} messages in this conversation`} className={cn("shrink-0 self-center rounded-full px-1.5 text-[11px] tabular-nums max-md:text-[12px]", selected ? "bg-white/25" : "bg-muted text-muted-foreground")}>
+                  {m.threadCount}
+                </span>
+              )}
               {m.hasAttachments && <Paperclip aria-label="Has attachments" className={cn("size-3 shrink-0 self-center", muted)} />}
               <span className={cn("shrink-0 text-xs tabular-nums max-md:text-[14px]", muted)}>{listDate(m.date)}</span>
             </div>

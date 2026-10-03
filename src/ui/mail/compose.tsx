@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Loader2, Paperclip, Send, X } from "lucide-react";
 import { toast } from "sonner";
@@ -9,27 +9,28 @@ import { post } from "@/lib/api";
 import { EMAIL_RE, fileSize, fullDate, parseRecipients } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useIdentities } from "./data";
-import type { MessageDetail, OutgoingAttachment, SendRequest } from "../../shared/api";
+import { RecipientInput } from "./recipient-input";
+import type { DraftPayload, MessageDetail, OutgoingAttachment, SendRequest } from "../../shared/api";
 
-export interface Draft {
-  mode: "new" | "reply" | "replyAll" | "forward";
-  from: string;
-  to: string;
-  cc: string;
-  subject: string;
-  text: string;
-  inReplyToId?: string;
-  forwardAttachments?: number[];
-  forwardedNames?: string[];
+/** What the compose window is opened with. `id` is set when an autosaved draft is reopened. */
+export interface Draft extends DraftPayload {
+  id?: string;
 }
 
 const quote = (text: string) => text.replace(/\r\n/g, "\n").split("\n").map((l) => (l.startsWith(">") ? `>${l}` : `> ${l}`)).join("\n");
 const prefixed = (prefix: string, subject: string) => (new RegExp(`^${prefix}:`, "i").test(subject.trim()) ? subject : `${prefix}: ${subject}`);
 const person = (p: { name: string; address: string }) => (p.name ? `${p.name} <${p.address}>` : p.address);
 
-/** Builds the draft for replying to / forwarding a message. From defaults to the address that received it. */
-export function draftFor(mode: Draft["mode"], m: MessageDetail | null, fallbackFrom: string): Draft {
-  if (!m || mode === "new") return { mode: "new", from: fallbackFrom, to: "", cc: "", subject: "", text: "" };
+/** "-- " on its own line is the conventional signature separator; mail clients recognise and fold it. */
+const signed = (signature: string) => (signature.trim() ? `\n\n-- \n${signature.trim()}` : "");
+
+/**
+ * Builds the draft for a new message, a reply or a forward. From defaults to the address that
+ * received the message. The signature goes under your text and above any quoted message.
+ */
+export function draftFor(mode: Draft["mode"], m: MessageDetail | null, fallbackFrom: string, signature = ""): Draft {
+  const sig = signed(signature);
+  if (!m || mode === "new") return { mode: "new", from: fallbackFrom, to: "", cc: "", subject: "", text: sig };
   const ours = new Set(m.addresses);
   const from = m.replyFrom || fallbackFrom;
   if (mode === "forward") {
@@ -40,7 +41,7 @@ export function draftFor(mode: Draft["mode"], m: MessageDetail | null, fallbackF
       to: "",
       cc: "",
       subject: prefixed("Fwd", m.subject),
-      text: `\n\n${header}\n\n${m.text}`,
+      text: `${sig}\n\n${header}\n\n${m.text}`,
       inReplyToId: m.id,
       forwardAttachments: m.attachments.map((a) => a.index),
       forwardedNames: m.attachments.map((a) => a.filename),
@@ -56,7 +57,7 @@ export function draftFor(mode: Draft["mode"], m: MessageDetail | null, fallbackF
     to: [...target, ...others].join(", "),
     cc: cc.join(", "),
     subject: prefixed("Re", m.subject),
-    text: `\n\nOn ${fullDate(m.date)}, ${person(m.from)} wrote:\n${quote(m.text)}`,
+    text: `${sig}\n\nOn ${fullDate(m.date)}, ${person(m.from)} wrote:\n${quote(m.text)}`,
     inReplyToId: m.id,
   };
 }
@@ -88,11 +89,15 @@ export function Compose({ draft, onClose }: { draft: Draft; onClose: () => void 
   const qc = useQueryClient();
   const identities = useIdentities();
   const [from, setFrom] = useState(draft.from);
-  const [fromName, setFromName] = useState(() => localStorage.getItem(NAME_KEY) ?? "");
+  const [fromName, setFromName] = useState(() => draft.fromName ?? localStorage.getItem(NAME_KEY) ?? "");
   const [to, setTo] = useState(draft.to);
   const [cc, setCc] = useState(draft.cc);
-  const [bcc, setBcc] = useState("");
-  const [showCc, setShowCc] = useState(!!draft.cc);
+  const [bcc, setBcc] = useState(draft.bcc ?? "");
+  const [showCc, setShowCc] = useState(!!draft.cc || !!draft.bcc);
+  // The draft is saved on the server while you type, under an id chosen here.
+  const draftId = useRef(draft.id ?? crypto.randomUUID());
+  const [saved, setSaved] = useState<"idle" | "saving" | "saved">(draft.id ? "saved" : "idle");
+  const closed = useRef(false);
   const [subject, setSubject] = useState(draft.subject);
   const [text, setText] = useState(draft.text);
   const [files, setFiles] = useState<File[]>([]);
@@ -130,7 +135,28 @@ export function Compose({ draft, onClose }: { draft: Draft; onClose: () => void 
   const localPart = fromClean.includes("@") ? fromClean.slice(0, fromClean.lastIndexOf("@")) : fromClean;
 
   const attachBytes = files.reduce((n, f) => n + f.size, 0);
-  const dirty = text !== draft.text || to !== draft.to || subject !== draft.subject || files.length > 0;
+  const dirty = text !== draft.text || to !== draft.to || cc !== draft.cc || subject !== draft.subject || from !== draft.from || files.length > 0;
+
+  // Autosave a moment after the last change. Attachments are not part of a draft.
+  const payload: DraftPayload = { mode: draft.mode, from, fromName, to, cc, bcc, subject, text, inReplyToId: draft.inReplyToId, forwardAttachments: draft.forwardAttachments, forwardedNames: draft.forwardedNames };
+  const snapshot = JSON.stringify(payload);
+  const lastSaved = useRef(draft.id ? snapshot : "");
+  useEffect(() => {
+    if (snapshot === lastSaved.current || (!dirty && !draft.id)) return;
+    const t = setTimeout(async () => {
+      if (closed.current) return;
+      setSaved("saving");
+      try {
+        await post("/mail/drafts", { id: draftId.current, payload: JSON.parse(snapshot) });
+        lastSaved.current = snapshot;
+        if (!closed.current) setSaved("saved");
+        void qc.invalidateQueries({ queryKey: ["drafts"] });
+      } catch {
+        if (!closed.current) setSaved("idle");
+      }
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [snapshot]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const send = useMutation({
     mutationFn: async () => {
@@ -152,12 +178,15 @@ export function Compose({ draft, onClose }: { draft: Draft; onClose: () => void 
         inReplyToId: draft.inReplyToId,
         forwardAttachments: draft.mode === "forward" ? (keepForwarded ? draft.forwardAttachments ?? [] : []) : undefined,
         attachments,
+        draftId: draftId.current,
       };
       return post<{ id: string }>("/mail/send", req);
     },
     onSuccess: () => {
       localStorage.setItem(NAME_KEY, fromName.trim());
+      closed.current = true;
       toast.success("Message sent");
+      qc.invalidateQueries({ queryKey: ["drafts"] });
       qc.invalidateQueries({ queryKey: ["messages"] });
       qc.invalidateQueries({ queryKey: ["mailboxes"] });
       qc.invalidateQueries({ queryKey: ["identities"] });
@@ -167,14 +196,23 @@ export function Compose({ draft, onClose }: { draft: Draft; onClose: () => void 
     onError: (err) => toast.error((err as Error).message),
   });
 
-  const tryClose = () => {
+  const tryClose = async () => {
     if (send.isPending) return;
-    if (dirty && !window.confirm("Discard this message?")) return;
+    const worthKeeping = dirty || !!draft.id;
+    // OK keeps it in Drafts (it has been saving all along), Cancel throws it away.
+    const keep = worthKeeping && window.confirm("Keep this message in Drafts?\n\nOK keeps it. Cancel discards it.");
+    closed.current = true;
+    if (keep) {
+      if (snapshot !== lastSaved.current) await post("/mail/drafts", { id: draftId.current, payload }).catch(() => toast.error("The draft could not be saved"));
+    } else if (lastSaved.current || draft.id) {
+      await post("/mail/drafts/delete", { id: draftId.current }).catch(() => {});
+    }
+    void qc.invalidateQueries({ queryKey: ["drafts"] });
     onClose();
   };
 
   return (
-    <Dialog open onOpenChange={(open) => !open && tryClose()}>
+    <Dialog open onOpenChange={(open) => !open && void tryClose()}>
       <DialogContent
         showCloseButton={false}
         onOpenAutoFocus={initialFocus}
@@ -186,9 +224,10 @@ export function Compose({ draft, onClose }: { draft: Draft; onClose: () => void 
         className="flex h-[min(680px,90vh)] w-[min(760px,94vw)] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none max-md:h-dvh max-md:w-screen max-md:rounded-none max-md:border-0 max-md:pt-[env(safe-area-inset-top)] max-md:pb-[env(safe-area-inset-bottom)]"
       >
         <div className="bg-muted/60 flex h-11 shrink-0 items-center gap-2 border-b px-3 max-md:h-12 max-md:[&_button]:min-h-10 max-md:[&_button]:min-w-10">
-          <Button variant="ghost" size="icon-sm" onClick={tryClose} aria-label="Close"><X /></Button>
+          <Button variant="ghost" size="icon-sm" onClick={() => void tryClose()} aria-label="Close"><X /></Button>
           <DialogTitle className="flex-1 truncate text-center text-[13px] font-semibold">{subject || (draft.mode === "new" ? "New Message" : "Message")}</DialogTitle>
           <DialogDescription className="sr-only">Compose a message</DialogDescription>
+          <span aria-live="polite" className="text-muted-foreground w-16 shrink-0 text-right text-[11px] max-md:hidden">{saved === "saving" ? "Saving…" : saved === "saved" ? "Draft saved" : ""}</span>
           <Button variant="ghost" size="icon-sm" onClick={() => picker.current?.click()} aria-label="Attach files"><Paperclip /></Button>
           <Button size="sm" onClick={() => send.mutate()} disabled={send.isPending}>
             {send.isPending ? <Loader2 className="animate-spin" /> : <Send />} Send
@@ -196,13 +235,13 @@ export function Compose({ draft, onClose }: { draft: Draft; onClose: () => void 
         </div>
 
         <Field label="To:" htmlFor="c-to">
-          <input id="c-to" ref={toRef} className={inputClass} value={to} onChange={(e) => setTo(e.target.value)} autoComplete="off" spellCheck={false} placeholder="name@example.com, another@example.com" />
+          <RecipientInput id="c-to" inputRef={toRef} className={cn(inputClass, "w-full")} value={to} onChange={setTo} placeholder="name@example.com, another@example.com" />
           {!showCc && <button type="button" className="text-muted-foreground hover:text-foreground text-xs" onClick={() => setShowCc(true)}>Cc/Bcc</button>}
         </Field>
         {showCc && (
           <>
-            <Field label="Cc:" htmlFor="c-cc"><input id="c-cc" className={inputClass} value={cc} onChange={(e) => setCc(e.target.value)} autoComplete="off" spellCheck={false} /></Field>
-            <Field label="Bcc:" htmlFor="c-bcc"><input id="c-bcc" className={inputClass} value={bcc} onChange={(e) => setBcc(e.target.value)} autoComplete="off" spellCheck={false} /></Field>
+            <Field label="Cc:" htmlFor="c-cc"><RecipientInput id="c-cc" className={cn(inputClass, "w-full")} value={cc} onChange={setCc} /></Field>
+            <Field label="Bcc:" htmlFor="c-bcc"><RecipientInput id="c-bcc" className={cn(inputClass, "w-full")} value={bcc} onChange={setBcc} /></Field>
           </>
         )}
         <Field label="Subject:" htmlFor="c-subject"><input id="c-subject" className={inputClass} value={subject} onChange={(e) => setSubject(e.target.value)} /></Field>

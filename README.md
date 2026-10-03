@@ -14,7 +14,11 @@ system I use every day. Internally it is called **eisenmail**.
   reaches the sender *from the address they wrote to*. The private mailbox never shows.
 - **A private file drop** with opt-in public links.
 
-It runs on two container Lambdas and one small PostgreSQL, for a few dollars a month.
+- **An alias manager.** Note who each address was given to, see what it receives, and block it the
+  day it starts getting spam.
+
+It runs on two container Lambdas and one small PostgreSQL, for a few dollars a month, with nightly
+backups that can be restored anywhere.
 
 ![Webmail on the desktop](docs/screenshots/mail.png)
 
@@ -56,14 +60,23 @@ It runs on two container Lambdas and one small PostgreSQL, for a few dollars a m
   **receiving address**. An address is listed only while it has mail in its inbox: delete or
   archive the last message and the folder goes away. Every row shows which address the mail
   arrived on.
+- **Conversations.** A reply is shown with the message it answers, including what you sent.
 - Replies default to the address that received the message. The From field accepts any address on
   any configured domain, with a menu of addresses seen so far.
-- Flag, mark unread, archive, junk, trash, put back, permanent delete, search, multi-select,
-  attachments, raw source. Full keyboard control on the desktop (`↑ ↓` `j k` `r` `a` `f` `e` `s`
-  `u` `n` `/` `⌫` `⌘↩`).
+- **Drafts** save as you type and wait in a Drafts folder. Recipients autocomplete from people you
+  have corresponded with. A signature is added under your text.
+- Flag, mark unread, mark all as read, archive, junk, trash, put back, permanent delete, search,
+  multi-select, image previews, attachments of any size, raw source. Trash and Junk empty
+  themselves after 30 days.
+- **Filters** archive, flag, mark read or bin mail as it arrives, by sender, subject or address.
+- Full keyboard control on the desktop (`↑ ↓` `j k` `r` `a` `f` `e` `s` `u` `n` `/` `⌫` `⌘↩`).
 - New mail appears within 30 seconds while the page is open.
 
-![Replying from the address that received the message](docs/screenshots/compose.png)
+![A conversation, with the reply sent from the webmail](docs/screenshots/conversation.png)
+
+| | |
+| --- | --- |
+| ![Compose with recipient suggestions](docs/screenshots/compose.png) | ![Image attachments previewed in place](docs/screenshots/attachments.png) |
 
 ### Hostile mail stays harmless
 
@@ -75,14 +88,18 @@ of their own. Remote images, the usual open-tracking pixel, stay blocked until a
 | --- | --- |
 | ![HTML mail with remote content blocked](docs/screenshots/mail-html.png) | ![A message full of scripts, forms and trackers, rendered inert](docs/screenshots/mail-hostile.png) |
 
-### Forwarding, notifications and the reply relay
+### Addresses: forwarding, notifications, notes and blocking
 
 Each receiving address has its own rule: forward a copy to the private mailbox or not, send a push
 notification or not, and forward the original inline or as an attachment. A default covers
-addresses that have never received mail. Mail is always stored and shown in the webmail, so the
-installed app with notifications can replace forwarding altogether.
+addresses that have never received mail. Each address can carry a note (who it was given to) and
+shows how much mail it holds. **Blocking** an address drops everything sent to it on arrival:
+the answer to an alias that has leaked. Mail is always stored and shown in the webmail unless the
+address is blocked, so the installed app with notifications can replace forwarding altogether.
 
-![Per-address forwarding and notification rules](docs/screenshots/rules.png)
+| | |
+| --- | --- |
+| ![Per-address rules, notes and a blocked address](docs/screenshots/rules.png) | ![Filters and signature](docs/screenshots/filters.png) |
 
 The relay works like the one classified-ad sites use:
 
@@ -108,8 +125,7 @@ nothing, so mail never sits in a browser cache.
 | ![Compose on a phone](docs/screenshots/phone-compose.png) | ![Rules on a phone](docs/screenshots/phone-rules.png) | ![File drop on a phone](docs/screenshots/phone-files.png) |
 
 To install: open `/mail` in Safari (Share, **Add to Home Screen**) or Chrome (**Install**), open
-it from the home screen, then account menu, **Forwarding & notifications**, **Turn on
-notifications**. On iPhone, notifications only work from the installed app (iOS 16.4 or later).
+it from the home screen, then account menu, **Mail settings**, **Turn on notifications**. On iPhone, notifications only work from the installed app (iOS 16.4 or later).
 
 ### File drop
 
@@ -118,6 +134,27 @@ Upload, download and delete files in S3 from the browser. Everything is private.
 Neither bucket is publicly readable; downloads are short-lived signed links.
 
 ![File drop](docs/screenshots/files.png)
+
+### Sign-in and people
+
+Passkeys (Face ID, Touch ID, a device PIN) sign in without a password and cannot be phished. The
+password remains as a fallback, with an authenticator code and one-time recovery codes. The owner
+can add **members**: separate sign-ins that see only the mail of chosen domains, for someone who
+shares one company but should not see the rest.
+
+| | |
+| --- | --- |
+| ![Passkeys, password and two-factor](docs/screenshots/security.png) | ![Members limited to chosen domains](docs/screenshots/people.png) |
+
+### Nothing gets lost
+
+- Every message SES accepts is written to S3 first. A scheduled job compares S3 with the database
+  every 15 minutes and replays anything that was never processed, so an outage delays mail instead
+  of losing it.
+- The database is backed up two ways: daily disk snapshots, and nightly logical dumps in S3 that
+  restore into any PostgreSQL. [docs/BACKUP-AND-MIGRATION.md](docs/BACKUP-AND-MIGRATION.md) covers
+  restoring, and what it would take to leave AWS.
+- Alarms report failing functions, API errors and a deteriorating SES sending reputation by email.
 
 ### Dark mode
 
@@ -129,9 +166,10 @@ Follows the system.
 
 Read [SECURITY.md](SECURITY.md) for the design and the findings of an independent review. In short:
 
-- scrypt password hashes, optional TOTP, revocable server-side sessions in `HttpOnly`, `Secure`,
-  `SameSite=Strict`, `__Host-` cookies, three-layer CSRF defence, login throttling that an attacker
-  cannot turn into a lockout;
+- passkeys, scrypt password hashes, TOTP with recovery codes, revocable server-side sessions in
+  `HttpOnly`, `Secure`, `SameSite=Strict`, `__Host-` cookies, three-layer CSRF defence, login
+  throttling that an attacker cannot turn into a lockout;
+- every query scoped to what the signed-in user may see;
 - strict Content-Security-Policy, no third-party scripts, no CORS;
 - parameterised SQL throughout, hostile input cleaned before it reaches the database;
 - no secrets in the repository or in container images: they are read from SSM at runtime;
@@ -163,9 +201,10 @@ cd py && uv venv .venv && uv pip install -r requirements-dev.txt && .venv/bin/py
 
 ## Deploying
 
-[docs/SETUP.md](docs/SETUP.md) lists every step for a new AWS account: repository settings, two
-CloudFormation stacks, the database host, secrets, SES and DNS, the custom domain, and a checklist
-to confirm it works. After that, merging to `main` deploys.
+[docs/SETUP.md](docs/SETUP.md) lists every step for a new AWS account: repository settings, three
+CloudFormation stacks (bootstrap, database, application), secrets, SES and DNS, the custom domain,
+and a checklist to confirm it works. After that, merging to `main` deploys. The database schema
+migrates itself: the web function applies `db/schema.sql` at start-up when it has changed.
 
 | Workflow | When | What |
 | --- | --- | --- |
@@ -179,13 +218,13 @@ to confirm it works. After that, merging to `main` deploys.
 
 | Path | What |
 | --- | --- |
-| `py/` | inbox lambda: `inbox.py` (handler), `relay.py` (message rewriting), `push.py`, `db.py`, `config.py`, `tests/` |
-| `src/server/` | web lambda: `app.ts` (routes, headers), `auth.ts`, `mail.ts`, `ingest.ts`, `send.ts`, `rules.ts`, `push.ts`, `files.ts`, `db.ts` |
+| `py/` | inbox lambda: `inbox.py` (handler), `relay.py` (message rewriting), `reconcile.py` (replay from S3), `push.py`, `db.py`, `config.py`, `tests/` |
+| `src/server/` | web lambda: `app.ts` (routes, headers), `auth.ts`, `passkeys.ts`, `users.ts`, `mail.ts`, `ingest.ts`, `send.ts`, `rules.ts`, `settings.ts`, `push.ts`, `files.ts`, `schema.ts`, `db.ts` |
 | `src/ui/` | `pages/` (portfolio, sign-in), `mail/`, `files/`, `settings/`, `components/ui/` (shadcn) |
 | `src/shared/api.ts` | types shared by server and UI |
 | `public/` | web app manifest, icons, `sw.js` |
 | `db/schema.sql` | the whole schema, idempotent |
-| `infra/` | `bootstrap.yml`, `app.yml` (CloudFormation), `db-host.sh` |
+| `infra/` | `bootstrap.yml`, `database.yml`, `app.yml` (CloudFormation), `db-host.sh` (also prepares your own hardware) |
 | `scripts/` | `dev.ts`, `seed.ts`, `set-user.ts`, `apply-schema.ts`, `push-keys.ts` |
 | `test/` | API integration tests, `e2e/` browser tests |
 
@@ -195,12 +234,16 @@ to confirm it works. After that, merging to `main` deploys.
 side handled it (`inbound`, `junk`, `relay_out`, `sent`). The web lambda indexes new rows into
 `messages` (sender, subject, our addresses and domains, mailbox, flags) when the webmail is open.
 `relay_tokens` maps each forward's reply address to its conversation. `address_rules` and
-`mail_settings` hold the per-address switches. `push_subscriptions` holds the devices to notify.
+`mail_settings` hold the per-address switches, notes and blocks. `mail_filters`, `drafts`,
+`push_subscriptions`, `webauthn_credentials` and `webmail_users` (owners and members) hold what
+their names say. `inbox_log` records every message the inbox function has finished with, which is
+what lets the reconcile job tell "never processed" from "deliberately dropped".
 
 ## Limits worth knowing
 
-- Lambda responses are capped at 6 MB, so larger attachments cannot be downloaded through the
-  webmail yet.
 - The relay replies to the original sender only (no reply-all), and does not rewrite a name,
   signature or the metadata inside attached files.
+- Read, flag and folder state is shared by everyone who can see a message.
+- Drafts do not keep attachments; add them when you send.
 - No offline mode: the installed app needs a connection.
+- A passkey is tied to the site's address. Add passkeys after the site is on its final domain.

@@ -1,0 +1,325 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  eisenmail database host (deploy once, after bootstrap.yml and before app.yml): one small EC2
+  instance that sets itself up as the PostgreSQL server at first boot (infra/db-host.sh), a daily
+  snapshot of its disk, and a bucket for its nightly dumps. Contains no secrets: the host makes
+  its own and puts them in SSM Parameter Store.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Where it runs }
+        Parameters: [VpcId, SubnetId, InstanceType, VolumeSizeGb, ImageId]
+      - Label: { default: What it runs at first boot }
+        Parameters: [GitHubRepository, GitRef]
+      - Label: { default: Backups }
+        Parameters: [SnapshotRetentionDays, DumpRetentionDays]
+      - Label: { default: Names }
+        Parameters: [ProjectName]
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eisenmail
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC for the instance. The account's default VPC is fine (docs/SETUP.md shows how to find it).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: A public subnet of that VPC (one whose route table has an internet gateway). Every subnet of a default VPC is.
+  InstanceType:
+    Type: String
+    Default: t4g.micro
+    AllowedValues: [t4g.nano, t4g.micro, t4g.small]
+    Description: >-
+      t4g.micro (1 GB) is the comfortable choice. t4g.nano (0.5 GB) is enough for one person's mail.
+      Can be changed later: the instance is stopped, resized and started again, keeping its disk and address.
+  VolumeSizeGb:
+    Type: Number
+    Default: 20
+    MinValue: 8
+    MaxValue: 1000
+    Description: >-
+      Size of the encrypted gp3 disk AT CREATION. Do not change it here afterwards (CloudFormation
+      would want a new instance). To grow the disk later see docs/BACKUP-AND-MIGRATION.md.
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
+    Description: >-
+      Canonical's public parameter for the current Ubuntu 24.04 arm64 image. It is read again on
+      every stack update, and a newer image would mean a NEW instance. The stack policy in
+      docs/SETUP.md blocks that; the host keeps itself up to date with unattended-upgrades instead.
+  GitHubRepository:
+    Type: String
+    Default: seisenberg/eisenberg.dev
+    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    Description: owner/name of the public repository infra/db-host.sh is downloaded from at first boot.
+  GitRef:
+    Type: String
+    Default: main
+    AllowedPattern: "^[A-Za-z0-9_./-]+$"
+    Description: >-
+      Branch, tag or commit of that repository. A full commit SHA is safer: it pins exactly the
+      script you reviewed. Only read at first boot; changing it later does not rerun anything.
+  SnapshotRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 365
+    Description: Daily snapshots of the disk are kept this many days.
+  DumpRetentionDays:
+    Type: Number
+    Default: 90
+    MinValue: 1
+    Description: Nightly database dumps in the backup bucket are kept this many days.
+
+Resources:
+  # ---- where the nightly dumps go -----------------------------------------------------------------
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-backups-${AWS::AccountId}"
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      # Versioning is what makes the backups safe from the host itself: it can only add objects,
+      # and writing over an existing name keeps the earlier version for another 30 days.
+      VersioningConfiguration: { Status: Enabled }
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-dumps
+            Status: Enabled
+            ExpirationInDays: !Ref DumpRetentionDays
+            NoncurrentVersionExpiration: { NoncurrentDays: 30 }
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+          - Id: remove-leftover-delete-markers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+
+  BackupBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackupBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt BackupBucket.Arn, !Sub "${BackupBucket.Arn}/*"]
+            Condition:
+              Bool: { aws:SecureTransport: "false" }
+
+  # ---- what the host itself may do ----------------------------------------------------------------
+  HostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-db-host"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Administrative access goes through Session Manager (IAM-authenticated, logged in
+        # CloudTrail), so there is no personal ssh key and no account you could log in to over ssh.
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: db-host
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The host stores what it generated at first boot, and checks on a later run that
+              # it is still there. Exactly these three names, nothing else under the prefix.
+              - Sid: PublishOwnSecrets
+                Effect: Allow
+                Action: [ssm:PutParameter, ssm:GetParameter]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/db_password"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/tunnel_key"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/tunnel_host_key"
+              # Write-only on purpose. There is no s3:GetObject, s3:DeleteObject or
+              # s3:DeleteObjectVersion here, so a compromised host can neither read old dumps nor
+              # destroy the backup history. The worst it can do is add objects.
+              - Sid: AddBackups
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${BackupBucket.Arn}/db/*"
+              - Sid: ListBackups
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt BackupBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: ["db/*"]
+              # One number per successful backup (the dump's size). The "no database backup"
+              # alarm in app.yml watches for it going missing.
+              - Sid: BackupHeartbeat
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Sub "${ProjectName}/Database"
+
+  HostProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${ProjectName}-db-host"
+      Roles: [!Ref HostRole]
+
+  # ---- network: one door, and behind it one account that can only forward to PostgreSQL --------
+  HostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} database host: ssh for the tunnel account only"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # Open to everyone because Lambda has no fixed addresses. The only account that accepts
+        # a key is "tunnel", which has no shell and may forward to 127.0.0.1:5432 and nowhere
+        # else. Password logins are off. PostgreSQL itself listens on localhost only.
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: ssh tunnel from the Lambda functions
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: package updates, SSM, S3
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-db" }
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-db" }
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref DatabaseInstance
+
+  # ---- the host ---------------------------------------------------------------------------------------
+  # It holds the data, so CloudFormation is never allowed to throw it away quietly:
+  # termination protection is on, and if an update ever replaced it the old one would be kept.
+  DatabaseInstance:
+    Type: AWS::EC2::Instance
+    DeletionPolicy: Delete # blocked by termination protection until you lift it (docs/SETUP.md, Removing everything)
+    UpdateReplacePolicy: Retain
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!GetAtt HostSecurityGroup.GroupId]
+      IamInstanceProfile: !Ref HostProfile
+      DisableApiTermination: true
+      Monitoring: false
+      # "standard" means a busy hour slows the machine down instead of adding to the bill
+      CreditSpecification: { CPUCredits: standard }
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref VolumeSizeGb
+            Encrypted: true
+            DeleteOnTermination: true
+      # the snapshot policy below finds the disk by this tag
+      PropagateTagsToVolumeOnCreation: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-db" }
+        - { Key: !Sub "${ProjectName}-snapshot", Value: daily }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Runs once, as root, at first boot. Its output is in /var/log/cloud-init-output.log
+          # (nothing secret is printed). The stack does not wait for it: docs/SETUP.md shows how
+          # to see that it finished (three SSM parameters appear).
+          set -euo pipefail
+
+          # The Elastic IP is attached a moment after the instance starts, and that swap of
+          # addresses cuts connections that are open. Wait for it before downloading anything.
+          public_ip() {
+            local token
+            token=$(curl -fs -m 2 -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" http://169.254.169.254/latest/api/token) || return 0
+            curl -fs -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/public-ipv4 || true
+          }
+          for _ in $(seq 1 60); do
+            [[ $(public_ip) == "${ElasticIp.PublicIp}" ]] && break
+            sleep 5
+          done
+
+          url="https://raw.githubusercontent.com/${GitHubRepository}/${GitRef}/infra/db-host.sh"
+          if ! curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/sbin/eisenmail-db-host "$url"; then
+            echo "eisenmail: could not download $url. This host is NOT set up as the database server." >&2
+            exit 1
+          fi
+          chmod 0700 /usr/local/sbin/eisenmail-db-host
+
+          MODE=aws PROJECT_NAME="${ProjectName}" AWS_REGION="${AWS::Region}" BACKUP_BUCKET="${BackupBucket}" \
+            bash /usr/local/sbin/eisenmail-db-host
+
+  # ---- daily snapshot of the disk -----------------------------------------------------------------
+  SnapshotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-db-snapshots"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: dlm.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
+
+  SnapshotPolicy:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: !Sub "${ProjectName} database disk - one snapshot a day"
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt SnapshotRole.Arn
+      PolicyDetails:
+        PolicyType: EBS_SNAPSHOT_MANAGEMENT
+        ResourceTypes: [VOLUME]
+        TargetTags:
+          - { Key: !Sub "${ProjectName}-snapshot", Value: daily }
+        Schedules:
+          - Name: daily
+            CopyTags: true
+            CreateRule:
+              Interval: 24
+              IntervalUnit: HOURS
+              Times: ["05:00"] # UTC; after the 03:17 dump, before the 09:00 reboot window
+            RetainRule:
+              Interval: !Ref SnapshotRetentionDays
+              IntervalUnit: DAYS
+
+Outputs:
+  DatabaseHost:
+    Description: The Elastic IP of the database host. app.yml imports it as the tunnel host.
+    Value: !GetAtt ElasticIp.PublicIp
+    Export: { Name: !Sub "${ProjectName}-db-host" }
+  InstanceId:
+    Description: For Session Manager (aws ssm start-session --target ...).
+    Value: !Ref DatabaseInstance
+    Export: { Name: !Sub "${ProjectName}-db-instance-id" }
+  BackupBucketName:
+    Description: Nightly dumps are under db/ in this bucket; db/LATEST names the newest.
+    Value: !Ref BackupBucket
+    Export: { Name: !Sub "${ProjectName}-backup-bucket" }

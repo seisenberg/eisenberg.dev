@@ -185,3 +185,118 @@ create table if not exists push_subscriptions (
     last_success_at timestamptz,
     failure_count   int not null default 0
 );
+
+-- =============================================================================================
+-- Additions (2026-10): schema bookkeeping, users and roles, passkeys, recovery codes, blocked
+-- addresses and notes, retention, conversations, drafts, filters, delivery log.
+-- =============================================================================================
+
+-- The web lambda applies this file at start-up when its hash differs from the one stored here.
+create table if not exists schema_meta (
+    id         boolean primary key default true check (id),
+    hash       text not null,
+    applied_at timestamptz not null default now()
+);
+
+-- ---- users: an owner sees everything; a member sees only the listed domains -----------------
+alter table webmail_users add column if not exists role text not null default 'owner';
+alter table webmail_users add column if not exists domains text[];            -- members only; null for owners
+alter table webmail_users add column if not exists signature text not null default '';
+do $$ begin
+    alter table webmail_users add constraint webmail_users_role_check check (role in ('owner', 'member'));
+exception when duplicate_object then null; end $$;
+
+-- One-time codes that replace the authenticator code when the phone is lost.
+create table if not exists webmail_recovery_codes (
+    code_hash  bytea primary key,                 -- sha256 of the code
+    user_id    int not null,
+    created_at timestamptz not null default now(),
+    used_at    timestamptz
+);
+create index if not exists webmail_recovery_codes_user on webmail_recovery_codes (user_id);
+
+-- Passkeys (WebAuthn).
+create table if not exists webauthn_credentials (
+    credential_id text primary key,               -- base64url
+    user_id       int not null,
+    public_key    bytea not null,                 -- COSE key
+    counter       bigint not null default 0,
+    transports    text[] not null default '{}',
+    name          text not null default 'Passkey',
+    created_at    timestamptz not null default now(),
+    last_used_at  timestamptz
+);
+create index if not exists webauthn_credentials_user on webauthn_credentials (user_id);
+
+create table if not exists webauthn_challenges (
+    id         uuid primary key,
+    challenge  text not null,
+    kind       text not null check (kind in ('register', 'login')),
+    user_id    int,
+    expires_at timestamptz not null
+);
+
+-- ---- addresses: block a leaked alias, remember who it was given to ------------------------------
+--   blocked: mail to this address is dropped on arrival (python), counted here, never stored.
+alter table address_rules add column if not exists blocked boolean not null default false;
+alter table address_rules add column if not exists note text not null default '';
+alter table address_rules add column if not exists blocked_count int not null default 0;
+alter table address_rules add column if not exists last_blocked_at timestamptz;
+
+-- ---- retention: Trash and Junk empty themselves ---------------------------------------------------
+alter table mail_settings add column if not exists purge_after_days int not null default 30;
+alter table mail_settings add column if not exists last_purge_at timestamptz;
+
+-- ---- conversations ---------------------------------------------------------------------------------
+alter table messages add column if not exists thread_id bigint;
+create index if not exists messages_thread on messages (thread_id);
+update messages set thread_id = id where thread_id is null;
+-- join replies to the conversation of the message they answer (repeat until stable)
+do $$
+declare changed int;
+begin
+    for i in 1..25 loop
+        update messages m set thread_id = least(m.thread_id, p.thread_id)
+          from messages p
+         where p.message_id_header is not null
+           and (p.message_id_header = m.in_reply_to or p.message_id_header = any (m.refs))
+           and p.thread_id < m.thread_id;
+        get diagnostics changed = row_count;
+        exit when changed = 0;
+    end loop;
+end $$;
+
+-- ---- drafts (autosaved by the compose window) ----------------------------------------------------
+create table if not exists drafts (
+    id         uuid primary key,                  -- chosen by the client
+    user_id    int not null,
+    updated_at timestamptz not null default now(),
+    payload    jsonb not null                     -- { mode, from, fromName, to, cc, bcc, subject, text, inReplyToId, forwardAttachments }
+);
+create index if not exists drafts_user on drafts (user_id, updated_at desc);
+
+-- ---- filters: applied when a received message is indexed ---------------------------------------
+--   every non-empty match_* must be contained in the corresponding field (case-insensitive)
+create table if not exists mail_filters (
+    id            bigint generated always as identity primary key,
+    position      int not null default 0,
+    enabled       boolean not null default true,
+    match_from    text not null default '',       -- sender name or address contains
+    match_subject text not null default '',       -- subject contains
+    match_address text not null default '',       -- one of OUR receiving addresses contains
+    action        text not null check (action in ('archive', 'read', 'flag', 'junk', 'trash')),
+    created_at    timestamptz not null default now()
+);
+
+-- ---- delivery log: one row per SES message the python lambda has finished with --------------------
+-- Lets the scheduled reconcile job tell "never processed" (replay it from S3) from "processed and
+-- deliberately not stored" (virus, DMARC reject, blocked address, relayed owner reply).
+create table if not exists inbox_log (
+    message_id text primary key,                  -- SES messageId
+    outcome    text not null,
+    at         timestamptz not null default now()
+);
+create index if not exists inbox_log_at on inbox_log (at);
+
+-- Usernames are compared case-insensitively at sign-in, so they must be unique that way too.
+create unique index if not exists webmail_users_email_lower on webmail_users (lower(email));

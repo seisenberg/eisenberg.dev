@@ -11,6 +11,9 @@ Safety properties
 * SSRF: an endpoint is only ever requested when it is https, has no userinfo, and its host is (a
   subdomain of) one of the known push services or a PUSH_ENDPOINT_ALLOW suffix. Everything else
   is skipped and logged. Redirects are never followed.
+* Scoped: a subscription belongs to a webmail user. An owner is notified of everything; a member
+  only of mail to one of its domains, and its badge (unread count) only counts those domains.
+  Subscriptions of users that no longer exist are deleted.
 * Bounded: at most MAX_SUBSCRIPTIONS per message, REQUEST_TIMEOUT per request, TIME_BUDGET overall.
 * Quiet: payloads, keys and full endpoints are never logged (the endpoint path is the secret that
   lets anyone push to that browser); only the host is.
@@ -21,11 +24,12 @@ this module imports without it.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
 import time
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Union
 from urllib.parse import quote
 
 import relay
@@ -41,11 +45,13 @@ ALLOWED_HOST_SUFFIXES = (
 )
 TTL_SECONDS = 86400
 REQUEST_TIMEOUT = 5.0
-MAX_SUBSCRIPTIONS = 20
+MAX_SUBSCRIPTIONS = 40          # overall ceiling per message
+MAX_PER_USER = 5                # so one user's subscriptions cannot crowd out another's
 TIME_BUDGET = 12.0
 MAX_PAYLOAD_BYTES = 2000
 TITLE_MAX = 80
 BODY_MAX = 140
+BADGE_MAX = 9999
 
 # scheme://host[:port]/path with a strict host alphabet: no userinfo, no backslashes, no
 # whitespace, so every URL parser agrees on which host this is.
@@ -101,11 +107,12 @@ def _truncate(text: str, limit: int) -> str:
     return text[: max(limit - 1, 0)].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
 
 
-def build_payload(msg, alias: str, ses_message_id: str) -> str:
+def build_payload(msg, alias: str, ses_message_id: str, badge: Optional[int] = None) -> str:
     """The notification JSON (always under MAX_PAYLOAD_BYTES of UTF-8).
 
     title = sender display name or address, body = subject; both go through the same cleaning
-    as forwarded headers, so no control characters (CR/LF, NUL, escapes) can get in."""
+    as forwarded headers, so no control characters (CR/LF, NUL, escapes) can get in.
+    `badge` (the subscriber's unread count, capped at BADGE_MAX) is left out when None."""
     title = relay.clean_display_name(relay.sender_label(msg), TITLE_MAX)
     body = _truncate(relay.clean_header_text(relay.header_value(msg, "Subject", ""), limit=4000), BODY_MAX)
     address = relay.clean_header_text(alias, limit=254)
@@ -116,6 +123,8 @@ def build_payload(msg, alias: str, ses_message_id: str) -> str:
         "url": "/mail?box=inbox&address=" + quote(address, safe=""),
         "tag": relay.clean_header_text(ses_message_id, limit=128),
     }
+    if badge is not None:
+        payload["badge"] = max(0, min(int(badge), BADGE_MAX))
 
     def encode() -> str:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -223,18 +232,57 @@ class PushNotifier:
     def subject(self, default_domain: str) -> str:
         return self.cfg.subject or f"mailto:postmaster@{default_domain}"
 
-    def notify(self, db: Any, payload: str, default_domain: str) -> Dict[str, int]:
-        """Push `payload` to every subscription. Returns counts: sent / gone / failed / skipped."""
-        counts = {"sent": 0, "gone": 0, "failed": 0, "skipped": 0}
+    def notify(
+        self,
+        db: Any,
+        payload: Union[str, Callable[..., str]],
+        default_domain: str,
+        recipient_domains: Optional[Iterable[str]] = None,
+    ) -> Dict[str, int]:
+        """Push to every subscription that may see this message.
+
+        `payload` is either the finished JSON, or a function (badge) or (badge, scope) -> JSON; with
+        a function the unread count is looked up once per distinct visibility (scope None = all mail,
+        for owners; otherwise a member's frozenset of domains) and passed in. `recipient_domains` are the receiving domains of the message:
+        a member is only notified when one of them is in the member's domains.
+        Returns counts: sent / gone / failed / skipped / filtered."""
+        counts = {"sent": 0, "gone": 0, "failed": 0, "skipped": 0, "filtered": 0}
         subject = self.subject(default_domain)
+        message_domains = frozenset(str(d).lower() for d in (recipient_domains or ()))
         start = self._clock()
-        subscriptions = list(db.list_push_subscriptions(MAX_SUBSCRIPTIONS))[:MAX_SUBSCRIPTIONS]
+        try:
+            removed = db.delete_orphan_push_subscriptions()
+            if removed:
+                log.info("push: %d subscription(s) of deleted users removed", removed)
+        except Exception as exc:
+            log.warning("push: could not remove orphaned subscriptions (%s)", type(exc).__name__)
+        subscriptions = list(db.list_push_subscriptions(MAX_SUBSCRIPTIONS, MAX_PER_USER))[:MAX_SUBSCRIPTIONS]
+        # a payload function may take (badge) or (badge, scope); with the scope it can show a member
+        # only an address on the member's own domains
+        takes_scope = callable(payload) and len(inspect.signature(payload).parameters) >= 2
+        payloads: Dict[Optional[frozenset], str] = {}
         for index, row in enumerate(subscriptions):
             remaining = TIME_BUDGET - (self._clock() - start)
             if remaining <= 0:
                 counts["skipped"] += len(subscriptions) - index
                 log.warning("push: time budget used up, %d subscription(s) skipped", len(subscriptions) - index)
                 break
+
+            # None = sees everything (owner); otherwise the set of domains this user may see
+            scope: Optional[frozenset] = None
+            if row.get("role") != "owner":
+                scope = frozenset(str(d).lower() for d in (row.get("domains") or ()))
+                if not (scope & message_domains):
+                    counts["filtered"] += 1
+                    continue
+            if scope not in payloads:
+                if isinstance(payload, str):
+                    payloads[scope] = payload
+                else:
+                    badge = self._badge(db, scope)
+                    payloads[scope] = payload(badge, scope) if takes_scope else payload(badge)
+            body = payloads[scope]
+
             endpoint = str(row["endpoint"])
             host = endpoint_host(endpoint)
             reason = check_endpoint(endpoint, self.cfg.endpoint_allow,
@@ -248,7 +296,7 @@ class PushNotifier:
             try:
                 status = self._send(
                     {"endpoint": endpoint, "keys": {"p256dh": row["p256dh"], "auth": row["auth"]}},
-                    payload,
+                    body,
                     subject=subject,
                     ttl=TTL_SECONDS,
                     timeout=min(REQUEST_TIMEOUT, max(1.0, remaining)),
@@ -273,3 +321,12 @@ class PushNotifier:
                     log.warning("push: %s answered %d", host, status)
                 db.push_failed(endpoint)
         return counts
+
+    @staticmethod
+    def _badge(db: Any, scope: Optional[frozenset]) -> Optional[int]:
+        """Unread count for one visibility scope; None (no badge) when it cannot be determined."""
+        try:
+            return min(int(db.count_unread(None if scope is None else sorted(scope))), BADGE_MAX)
+        except Exception as exc:
+            log.warning("push: unread count failed (%s); sending without badge", type(exc).__name__)
+            return None

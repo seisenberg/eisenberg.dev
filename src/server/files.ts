@@ -200,6 +200,29 @@ export async function localWrite(name: string, body: Readable, maxBytes: number)
 
 export { disposition };
 
+/** Lambda cannot return more than 6 MB. Bigger downloads are staged in S3 and handed out as a short-lived signed link. */
+export const DIRECT_DOWNLOAD_LIMIT = 4_500_000;
+
+/**
+ * Puts the bytes under the private bucket's tmp/ prefix (expired by a lifecycle rule after a day)
+ * and returns a signed link to them, or null when no bucket is configured.
+ */
+export async function stageDownload(filename: string, content: Buffer): Promise<string | null> {
+  const f = config.files;
+  if (f.driver !== 's3' || !f.privateBucket) return null;
+  const { S3Client, PutObjectCommand, GetObjectCommand } = await import('@aws-sdk/client-s3');
+  const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+  const { randomUUID } = await import('node:crypto');
+  const client = new S3Client({ region: f.region });
+  const Key = `tmp/${randomUUID()}`;
+  await client.send(new PutObjectCommand({ Bucket: f.privateBucket, Key, Body: content, ContentType: 'application/octet-stream' }));
+  return getSignedUrl(
+    client,
+    new GetObjectCommand({ Bucket: f.privateBucket, Key, ResponseContentDisposition: disposition(filename, false), ResponseContentType: 'application/octet-stream' }),
+    { expiresIn: 120 },
+  );
+}
+
 let store: FileStore | null | undefined;
 export function fileStore(): FileStore | null {
   if (store === undefined) store = config.files.driver === 's3' ? s3Store() : config.files.driver === 'local' ? localStore() : null;

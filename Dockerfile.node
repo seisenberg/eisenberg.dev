@@ -20,6 +20,8 @@ COPY --from=build /opt/eisenmail/package.json ./
 COPY --from=build /opt/eisenmail/node_modules ./node_modules
 COPY --from=build /opt/eisenmail/build ./build
 COPY --from=build /opt/eisenmail/dist ./dist
+# applied at start-up when it has changed (src/server/schema.ts)
+COPY db ./db
 ENV NODE_ENV=production \
     PORT=8080 \
     AWS_LWA_PORT=8080 \

@@ -202,3 +202,20 @@ def test_the_database_password_never_shows_up_in_reprs():
     cfg = config.load(BASE)
     assert cfg.db.password == "s3cret"
     assert "s3cret" not in repr(cfg) and "s3cret" not in repr(cfg.db)
+
+
+# ------------------------------------------------------------------------------------------
+# reconcile
+# ------------------------------------------------------------------------------------------
+def test_reconcile_settings():
+    cfg = config.load(BASE)
+    assert (cfg.reconcile_max_age_hours, cfg.reconcile_batch) == (72, 25)
+    cfg = config.load({**BASE, "RECONCILE_MAX_AGE_HOURS": "24", "RECONCILE_BATCH": " 5 "})
+    assert (cfg.reconcile_max_age_hours, cfg.reconcile_batch) == (24, 5)
+
+
+@pytest.mark.parametrize("name", ["RECONCILE_MAX_AGE_HOURS", "RECONCILE_BATCH"])
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "1.5"])
+def test_invalid_reconcile_settings(name, value):
+    with pytest.raises(config.ConfigError, match=name):
+        config.load({**BASE, name: value})

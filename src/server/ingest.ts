@@ -135,8 +135,29 @@ export async function parseRaw(raw: Buffer): Promise<ParsedMail> {
   return simpleParser(raw, { skipTextToHtml: true, skipHtmlToText: true });
 }
 
+export interface FilterRow {
+  match_from: string;
+  match_subject: string;
+  match_address: string;
+  action: 'archive' | 'read' | 'flag' | 'junk' | 'trash';
+}
+
+export async function loadFilters(db: Queryable): Promise<FilterRow[]> {
+  const res = await db.query<FilterRow>('select match_from, match_subject, match_address, action from mail_filters where enabled order by position, id');
+  return res.rows;
+}
+
+/** Every non-empty condition must be contained in its field. A filter with no condition matches nothing. */
+function filterMatches(f: FilterRow, m: { from: string; subject: string; addresses: string[] }): boolean {
+  const from = f.match_from.trim().toLowerCase();
+  const subject = f.match_subject.trim().toLowerCase();
+  const address = f.match_address.trim().toLowerCase();
+  if (!from && !subject && !address) return false;
+  return (!from || m.from.includes(from)) && (!subject || m.subject.includes(subject)) && (!address || m.addresses.some((a) => a.includes(address)));
+}
+
 /** Index one raw row. The caller marks it processed. */
-export async function indexRow(db: Queryable, row: RawRow): Promise<void> {
+export async function indexRow(db: Queryable, row: RawRow, filters: FilterRow[] = []): Promise<void> {
   let mail: ParsedMail | null = null;
   try {
     if (row.email_raw) mail = await simpleParser(row.email_raw, { skipTextToHtml: true, skipHtmlToText: true, skipImageLinks: true });
@@ -187,6 +208,35 @@ export async function indexRow(db: Queryable, row: RawRow): Promise<void> {
     ],
   );
 
+  // Conversation: join the thread of the message this one answers, else start a new one.
+  await db.query(
+    `update messages m
+        set thread_id = coalesce(
+              (select min(p.thread_id) from messages p
+                where p.id <> m.id and p.message_id_header is not null
+                  and (p.message_id_header = m.in_reply_to or p.message_id_header = any (m.refs))),
+              m.id)
+      where m.raw_id = $1 and m.thread_id is null`,
+    [row.message_id],
+  );
+
+  // Filters apply to ordinary received mail only.
+  if (row.kind === 'inbound') {
+    const subject = clean(mail?.subject, 1000).toLowerCase();
+    const sender = `${clean(from.name, 300)} ${clean(from.address, 320)}`.toLowerCase();
+    for (const f of filters) {
+      if (!filterMatches(f, { from: sender, subject, addresses })) continue;
+      const sql = {
+        read: 'is_read = true',
+        flag: 'is_flagged = true',
+        archive: `mailbox = 'archive'`,
+        junk: `prev_mailbox = 'inbox', mailbox = 'junk', trashed_at = now()`,
+        trash: `prev_mailbox = 'inbox', mailbox = 'trash', trashed_at = now()`,
+      }[f.action];
+      await db.query(`update messages set ${sql} where raw_id = $1`, [row.message_id]);
+    }
+  }
+
   const repliedTo = row.meta?.in_reply_to_raw_id;
   if (outbound && typeof repliedTo === 'string') {
     await db.query('update messages set is_answered = true where raw_id = $1', [repliedTo]);
@@ -197,8 +247,11 @@ export async function indexRow(db: Queryable, row: RawRow): Promise<void> {
 async function indexPlaceholder(db: Queryable, row: RawRow): Promise<void> {
   const outbound = row.kind === 'relay_out' || row.kind === 'sent';
   await db.query(
-    `insert into messages (raw_id, direction, mailbox, subject, snippet, received_at, size_bytes, is_read)
-     values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict (raw_id) do nothing`,
+    `with new as (
+       insert into messages (raw_id, direction, mailbox, subject, snippet, received_at, size_bytes, is_read)
+       values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict (raw_id) do nothing returning id
+     )
+     update messages m set thread_id = m.id from new where m.id = new.id`,
     [
       row.message_id,
       outbound ? 'out' : 'in',
@@ -237,10 +290,11 @@ export async function ingestPending(opts: { force?: boolean; minIntervalMs?: num
             limit ${BATCH}
             for update skip locked`,
         );
+        const filters = res.rows.length ? await loadFilters(client) : [];
         for (const row of res.rows) {
           await client.query('savepoint one_message');
           try {
-            await indexRow(client, row);
+            await indexRow(client, row, filters);
           } catch (err) {
             console.error(`ingest: ${row.message_id} failed, filing a placeholder: ${(err as Error).message}`);
             await client.query('rollback to savepoint one_message');

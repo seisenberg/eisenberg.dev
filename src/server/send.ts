@@ -3,7 +3,7 @@ import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import config from './config.js';
 import { tx } from './db.js';
 import { indexRow, parseRaw } from './ingest.js';
-import { HttpError, identities, isAddress, threadingFor } from './mail.js';
+import { HttpError, identities, isAddress, threadingFor, type Viewer } from './mail.js';
 import type { SendRequest } from '../shared/api.js';
 
 const MAX_RECIPIENTS = 50;
@@ -55,11 +55,11 @@ export function setTransport(t: Transport): void {
   transport = t;
 }
 
-export async function sendMail(input: SendRequest): Promise<{ id: string }> {
+export async function sendMail(v: Viewer, input: SendRequest): Promise<{ id: string }> {
   const req = (input ?? {}) as SendRequest;
   const from = String(req.from ?? '').trim().toLowerCase();
   if (!isAddress(from)) throw new HttpError(400, 'From is not a valid email address');
-  const { domains } = await identities();
+  const { domains } = await identities(v);
   const fromDomain = from.slice(from.lastIndexOf('@') + 1);
   if (!domains.includes(fromDomain)) {
     throw new HttpError(400, `Cannot send from ${fromDomain}. Allowed domains: ${domains.join(', ') || '(none configured)'}`);
@@ -94,7 +94,7 @@ export async function sendMail(input: SendRequest): Promise<{ id: string }> {
   let references: string[] | undefined;
   let repliedRawId: string | null = null;
   if (req.inReplyToId !== undefined && req.inReplyToId !== null) {
-    const thread = await threadingFor(req.inReplyToId);
+    const thread = await threadingFor(v, req.inReplyToId);
     repliedRawId = thread.rawId;
     const forwarding = Array.isArray(req.forwardAttachments);
     if (!forwarding && thread.messageId) {
@@ -144,6 +144,9 @@ export async function sendMail(input: SendRequest): Promise<{ id: string }> {
       [rawId, JSON.stringify(meta), raw],
     );
     await indexRow(client, { message_id: rawId, created_at: new Date(), kind: 'sent', event: null, meta, email_raw: raw });
+    if (typeof req.draftId === 'string' && /^[0-9a-f-]{36}$/i.test(req.draftId)) {
+      await client.query('delete from drafts where id = $1 and user_id = $2', [req.draftId, v.userId]);
+    }
     const res = await client.query<{ id: string }>('select id::text as id from messages where raw_id = $1', [rawId]);
     return res.rows[0].id;
   });

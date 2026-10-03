@@ -70,9 +70,9 @@ export async function subscribe(userId: number, input: PushSubscriptionInput, us
      on conflict (endpoint) do update set p256dh = excluded.p256dh, auth = excluded.auth, user_id = excluded.user_id, user_agent = excluded.user_agent, failure_count = 0`,
     [endpoint, p256dh, auth, userId, userAgent.slice(0, 300) || null],
   );
-  // keep the table small: a person has a handful of devices
+  // a person has a handful of devices; the python lambda also notifies at most 5 per user
   await query(
-    `delete from push_subscriptions where user_id = $1 and endpoint not in (select endpoint from push_subscriptions where user_id = $1 order by created_at desc limit 20)`,
+    `delete from push_subscriptions where user_id = $1 and endpoint not in (select endpoint from push_subscriptions where user_id = $1 order by created_at desc limit 5)`,
     [userId],
   );
 }

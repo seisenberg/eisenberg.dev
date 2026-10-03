@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, AtSign, ChevronRight, Flag, Globe, Inbox, Send, ShieldAlert, Trash2 } from "lucide-react";
+import { Archive, AtSign, ChevronRight, FilePen, Flag, Globe, Inbox, Send, ShieldAlert, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
 import type { MailboxTree } from "../../shared/api";
@@ -63,7 +63,7 @@ function loadCollapsed(): Set<string> {
   }
 }
 
-export function Sidebar({ tree, scope, onSelect, onEmpty, mobile }: { tree: MailboxTree | undefined; scope: Scope; onSelect: (s: Scope) => void; onEmpty: (box: "trash" | "junk") => void; mobile?: boolean }) {
+export function Sidebar({ tree, scope, onSelect, onEmpty, mobile, drafts = 0 }: { tree: MailboxTree | undefined; scope: Scope; onSelect: (s: Scope) => void; onEmpty: (box: "trash" | "junk") => void; mobile?: boolean; drafts?: number }) {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const toggle = (domain: string) => {
     setCollapsed((prev) => {
@@ -134,6 +134,7 @@ export function Sidebar({ tree, scope, onSelect, onEmpty, mobile }: { tree: Mail
       {tree && tree.domains.length === 0 && <div className="text-muted-foreground px-2 py-1 text-xs">No mail received yet</div>}
 
       <SectionLabel>Mailboxes</SectionLabel>
+      {row({ box: "drafts" }, <FilePen className="size-4" />, "Drafts", drafts)}
       {row({ box: "sent" }, <Send className="size-4" />, "Sent")}
       {row({ box: "archive" }, <Archive className="size-4" />, "Archive")}
       {(["junk", "trash"] as const).map((box) => (

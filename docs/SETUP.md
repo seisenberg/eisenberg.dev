@@ -13,9 +13,10 @@ What you end up with:
 | Piece | Where it comes from |
 | --- | --- |
 | Container registry, buckets, IAM roles, GitHub deploy role | `infra/bootstrap.yml`, deployed once by you |
-| The two Lambda functions, HTTPS endpoint, SES receiving rule | `infra/app.yml`, deployed by you |
+| The database host, its daily snapshots, the backup bucket | `infra/database.yml`, deployed once by you. The host sets itself up with `infra/db-host.sh` |
+| The two Lambda functions, HTTPS endpoint, SES receiving rule, reconcile schedule, alarms | `infra/app.yml`, deployed by you |
 | New code on every push to `main` | `.github/workflows/deploy.yml` |
-| Secrets (database password, tunnel key, push key) | SSM Parameter Store, typed in by you, never in git |
+| Secrets | SSM Parameter Store, never in git. The database host creates the database password and the tunnel key itself. The only one you type in is the optional push key |
 
 ---
 
@@ -35,7 +36,7 @@ Do this before anything else. The repository is public, so its settings are part
    - Optional but recommended: add yourself as a required reviewer, so every deploy waits for one click.
 5. **Settings, Rules, Rulesets.** New branch ruleset for `main`: restrict deletions, block force
    pushes, require a pull request, and require these status checks: `Node (typecheck, API tests, build, browser tests)`,
-   `Python (inbox lambda)`, `Container images build`, `CloudFormation templates lint`.
+   `Python (inbox lambda)`, `Container images build`, `Infrastructure templates and scripts lint`.
    (The check names appear in the list after the first workflow run.)
 6. Deploy keys: the key that pushes from the development machine should be the only one with
    write access. Remove it when it is no longer needed.
@@ -45,8 +46,8 @@ Do this before anything else. The repository is public, so its settings are part
 1. Sign in as root once: set a strong password, add **MFA**, and do not create root access keys.
 2. Create an administrator for daily use through **IAM Identity Center** (or an IAM user with MFA)
    and use that from here on.
-3. **Billing, Budgets**: create a monthly cost budget of a few dollars with an email alert. This
-   system should cost little; an alert is how you find out if something is wrong.
+3. **Billing, Budgets**: create a monthly cost budget of a few dollars above what "What it costs"
+   below predicts, with an email alert. An alert is how you find out if something is wrong.
 4. Optional: switch on CloudTrail (the default 90 day event history is already there).
 
 ## 3. Deploy the bootstrap stack
@@ -83,50 +84,118 @@ Keep the output on screen: you need `DeployRoleArn` next.
 
 The system needs one small PostgreSQL. The cheapest arrangement, and the one this project was
 designed around, is a tiny EC2 instance reached through an ssh tunnel that can do nothing but
-forward to PostgreSQL.
+forward to PostgreSQL. `infra/database.yml` creates it, and the machine sets itself up at first
+boot. You do not log in to it, copy files to it or create any key.
 
-1. Create the tunnel key pair **on your own machine** (not on the server):
+Size: the default is `t4g.micro` (1 GB of memory). `t4g.nano` (0.5 GB) works for one person's
+mail and costs about half. To choose it, add `InstanceType=t4g.nano` to the deploy command below.
 
-   ```bash
-   ssh-keygen -t ed25519 -N "" -C eisenmail-tunnel -f ./eisenmail_tunnel
-   ```
-
-2. Launch an instance: Ubuntu Server 24.04, `t4g.micro` (or `t4g.nano`), 20 GB gp3, in a public
-   subnet with a public IPv4 address. Give it an Elastic IP so the address survives a stop/start.
-   Security group: inbound TCP 22 from anywhere (Lambda has no fixed addresses; the tunnel account
-   is the only way in and it has no shell), nothing else. Use an EC2 key pair or Session Manager
-   for your own administrative access.
-3. Copy two files to the instance and run the script:
+1. Find the account's default VPC and one of its subnets. Every subnet of a default VPC is public,
+   which is what the instance needs.
 
    ```bash
-   scp infra/db-host.sh db/schema.sql ubuntu@<instance-address>:
-   ssh ubuntu@<instance-address> \
-     "sudo TUNNEL_PUBLIC_KEY='$(cat eisenmail_tunnel.pub)' SCHEMA_FILE=schema.sql bash db-host.sh"
+   VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query "Vpcs[0].VpcId" --output text)
    ```
 
-   It installs PostgreSQL (listening on localhost only), creates the database and its role,
-   applies the schema, creates the restricted `tunnel` account, switches off password logins, and
-   prints two things: the **database password** and the **host key line**. Copy both.
+   ```bash
+   SUBNET_ID=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC_ID Name=default-for-az,Values=true --query "Subnets[0].SubnetId" --output text)
+   ```
 
-Alternative: any PostgreSQL 14 or later that the functions can reach over TLS (for example RDS).
-Leave `TunnelHost` empty in step 7, set `DbHost` to its endpoint and keep `DbSslMode=verify-full`.
+   ```bash
+   echo "$VPC_ID $SUBNET_ID"
+   ```
 
-## 6. Store the secrets
+   You should see one `vpc-...` and one `subnet-...`. If the first is `None`, the account has no
+   default VPC. Create one with `aws ec2 create-default-vpc` and run the three commands again.
+
+2. Deploy the stack. `GitRef` pins the exact version of `infra/db-host.sh` the machine downloads
+   from this public repository and runs at first boot, so the commit must already be pushed to
+   GitHub.
+
+   ```bash
+   aws cloudformation deploy \
+     --stack-name eisenmail-database \
+     --template-file infra/database.yml \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --parameter-overrides VpcId=$VPC_ID SubnetId=$SUBNET_ID GitRef=$(git rev-parse HEAD)
+   ```
+
+   If it fails because the instance type is not offered in that subnet's zone, delete the failed
+   stack, pick another subnet (`Subnets[1]` in the second command) and deploy again.
+
+3. Tell CloudFormation that it may never replace or delete the machine that holds your mail.
+   This matters because the stack looks up the newest Ubuntu image every time it is updated, and
+   a newer image would otherwise mean a new, empty machine.
+
+   ```bash
+   aws cloudformation set-stack-policy --stack-name eisenmail-database --stack-policy-body '{"Statement":[{"Effect":"Allow","Action":"Update:*","Principal":"*","Resource":"*"},{"Effect":"Deny","Action":["Update:Replace","Update:Delete"],"Principal":"*","Resource":"LogicalResourceId/DatabaseInstance"}]}'
+   ```
+
+4. Wait for the machine to finish setting itself up. It takes three to five minutes after the
+   stack is done. It is finished when three parameters exist:
+
+   ```bash
+   aws ssm get-parameters-by-path --path /eisenmail --query "Parameters[].[Name,Type]" --output table
+   ```
+
+   | Name | Type | What it is |
+   | --- | --- | --- |
+   | `/eisenmail/db_password` | SecureString | the database password, generated on the machine |
+   | `/eisenmail/tunnel_key` | SecureString | the private key of the tunnel account, generated on the machine and then erased there |
+   | `/eisenmail/tunnel_host_key` | String | the machine's public host key, so the functions only ever talk to this machine |
+
+   The machine also takes its first backup at the end of the setup. This shows its name and size:
+
+   ```bash
+   BACKUP_BUCKET=$(aws cloudformation describe-stacks --stack-name eisenmail-database --query "Stacks[0].Outputs[?OutputKey=='BackupBucketName'].OutputValue" --output text)
+   ```
+
+   ```bash
+   aws s3 cp s3://$BACKUP_BUCKET/db/LATEST -
+   ```
+
+   If the parameters have not appeared after ten minutes, read what the machine printed while
+   booting. Nothing secret is in that log.
+
+   ```bash
+   INSTANCE_ID=$(aws cloudformation describe-stacks --stack-name eisenmail-database --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
+   ```
+
+   ```bash
+   aws ec2 get-console-output --instance-id $INSTANCE_ID --latest --output text | tail -n 60
+   ```
+
+What you have now: PostgreSQL listening on localhost only, an empty database (the web function
+creates the tables when it first starts), a `tunnel` account that can only forward a port to
+PostgreSQL, automatic security updates, a snapshot of the disk every day, and a database dump in
+the backup bucket every night. [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md) explains the
+backups and how to restore them.
+
+Alternative: any PostgreSQL 14 or later that you run yourself. In step 7 set
+`UseDatabaseStack=false`. For a server the functions reach over TLS (for example RDS), set `DbHost`
+to its endpoint and keep `DbSslMode=verify-full`. For your own machine behind an ssh tunnel, see
+"Running the database on your own hardware" in [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md).
+In both cases you store `/eisenmail/db_password` yourself.
+
+## 6. Store the one secret you create yourself (optional)
+
+The database password and the tunnel key are already in SSM Parameter Store. The only secret left
+is the key for push notifications. Skip this step if you do not want notifications on your phone.
+You can come back to it later.
 
 ```bash
-aws ssm put-parameter --name /eisenmail/db_password --type SecureString --value '<database password from step 5>'
-aws ssm put-parameter --name /eisenmail/tunnel_key  --type SecureString --value "$(cat eisenmail_tunnel)"
+npm ci
 ```
 
-Push notifications (optional, can be added later):
+```bash
+npm run push:keys
+```
 
 ```bash
-npm ci && npm run push:keys
 aws ssm put-parameter --name /eisenmail/vapid_private_key --type SecureString --value '<VAPID_PRIVATE_KEY>'
 ```
 
-Keep the `VAPID_PUBLIC_KEY` line for step 7. Then delete the local key files and clear your
-shell history: `rm eisenmail_tunnel eisenmail_tunnel.pub`.
+Keep the `VAPID_PUBLIC_KEY` line for step 7. It is not a secret. Then clear your shell history.
 
 ## 7. Deploy the application stack
 
@@ -138,8 +207,7 @@ aws cloudformation deploy \
     MailDomains=eisenberg.dev \
     ForwardTo=<your private mailbox> \
     DefaultFrom=<an address you want as the default sender> \
-    TunnelHost=<instance address> \
-    TunnelHostKey='<host key line from step 5>' \
+    AlertEmail=<where alarms should be sent> \
     VapidPublicKey=<VAPID_PUBLIC_KEY, or leave this line out>
 ```
 
@@ -149,9 +217,20 @@ aws cloudformation describe-stacks --stack-name eisenmail --query "Stacks[0].Out
 
 Several domains are a quoted comma list: `MailDomains="eisenberg.dev,example-llc.com"`.
 
+The database address and host key are taken from the database stack. There is nothing to type.
+
+`AlertEmail` switches the alarms on: the inbox function failing or being throttled, the web
+function or the site returning errors, the SES bounce or complaint rate getting close to the level
+where AWS steps in, and no database backup for 36 hours. AWS sends a message with the subject
+"AWS Notification - Subscription Confirmation" to that address. **Click the link in it.** Until
+you do, no alarm reaches you. Leave `AlertEmail` out and no alarms are created.
+
 `SiteUrl` is where the site answers right now (a generated `execute-api` address until the domain
 moves in step 10). To change any setting later, run the same command with the parameter you want
 to change; the others keep their values.
+
+Open `<SiteUrl>/api/health` in a browser. It must show `{"ok":true}`. This first request also
+creates the database tables, which step 8 needs.
 
 To use the file drop while the site is still on the temporary address, allow that origin to upload:
 
@@ -162,33 +241,55 @@ aws cloudformation deploy --stack-name eisenmail-bootstrap --template-file infra
 
 ## 8. Create your sign-in
 
-The web user is created from your machine through the same tunnel the functions use. In one
-terminal:
+The web user is created from your machine, straight into the database. There is no ssh key for
+you on the database host. You reach it through AWS Session Manager, which needs the
+[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+for the AWS CLI on your machine (AWS CloudShell already has it). In one terminal:
 
 ```bash
-ssh -i <your admin key> -N -L 15432:127.0.0.1:5432 ubuntu@<instance address>
+INSTANCE_ID=$(aws cloudformation describe-stacks --stack-name eisenmail-database --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
 ```
 
-In another:
+```bash
+aws ssm start-session --target $INSTANCE_ID --document-name AWS-StartPortForwardingSession --parameters portNumber=5432,localPortNumber=15432
+```
+
+Leave it running. In another terminal, in the repository (after `npm ci`):
 
 ```bash
-POSTGRES_DB_HOST=127.0.0.1 POSTGRES_DB_PORT=15432 POSTGRES_DB_USER=eisenmail \
-POSTGRES_DB_NAME=emails POSTGRES_DB_PASSWORD='<database password>' \
+POSTGRES_DB_PASSWORD="$(aws ssm get-parameter --name /eisenmail/db_password --with-decryption --query Parameter.Value --output text)" \
+POSTGRES_DB_HOST=127.0.0.1 POSTGRES_DB_PORT=15432 POSTGRES_DB_USER=eisenmail POSTGRES_DB_NAME=emails \
 npm run user:set -- <username>
 ```
 
-It asks for the password twice (12 characters or more). Open `SiteUrl`, go to `/mail`, sign in,
-then open the account menu, **Security settings**, and switch on two-factor authentication.
+The database password goes from SSM straight into the environment of that one command. It is not
+shown and not stored. The command asks for your new sign-in password twice (12 characters or
+more). Then stop the first terminal with Ctrl-C.
+
+Open `SiteUrl`, go to `/mail` and sign in. Then do two things right away:
+
+1. Account menu, **Security settings**: switch on two-factor authentication.
+2. Account menu, **Mail settings**: create a delivery rule for the address
+   `dmarc@<your domain>` with **Forward** off and **Notify** off (one rule per domain).
+   Step 9 publishes that address as the place where other mail providers send their daily DMARC
+   reports. The rule keeps those machine-made reports in the webmail, where you can look at them
+   when you want, and out of your private mailbox and your phone's notifications.
 
 ## 9. Mail: SES identities, DNS, receiving, sending
 
 For **each** domain in `MailDomains`:
 
-1. Create the identity and read its DKIM tokens:
+1. Create the identity, read its DKIM tokens, and set the custom MAIL FROM domain:
 
    ```bash
    aws sesv2 create-email-identity --email-identity eisenberg.dev
+   ```
+
+   ```bash
    aws sesv2 get-email-identity --email-identity eisenberg.dev --query "DkimAttributes.Tokens"
+   ```
+
+   ```bash
    aws sesv2 put-email-identity-mail-from-attributes --email-identity eisenberg.dev --mail-from-domain mail.eisenberg.dev
    ```
 
@@ -218,9 +319,13 @@ Then, once for the account:
    (mail type: transactional; describe it as personal mail for your own domains with replies to
    people who wrote to you). Until it is granted, SES only sends to verified addresses. To use the
    system meanwhile, verify your private mailbox as an identity:
-   `aws sesv2 create-email-identity --email-identity <your private mailbox>`.
 
-Adding a domain later: add it to `MailDomains` (step 7 command), then repeat 1 and 2 for it.
+   ```bash
+   aws sesv2 create-email-identity --email-identity <your private mailbox>
+   ```
+
+Adding a domain later: add it to `MailDomains` (step 7 command), repeat 1 and 2 for it, and
+create its `dmarc@` delivery rule (step 8).
 
 ## 10. Move the site to its domain
 
@@ -247,7 +352,7 @@ Adding a domain later: add it to `MailDomains` (step 7 command), then repeat 1 a
 ## 11. Phone
 
 Open `https://eisenberg.dev/mail` on the phone, sign in, add it to the home screen, open it from
-there, then account menu, **Forwarding & notifications**, **Turn on notifications**, **Send a test
+there, then account menu, **Mail settings**, **Turn on notifications**, **Send a test
 notification**. Details are in the README under "On your phone".
 
 ## 12. Check that it works
@@ -262,30 +367,76 @@ notification**. Details are in the README under "On your phone".
       switch is on.
 - [ ] Security settings shows your real IP address under "Signed-in devices". If it shows an AWS
       address, `TrustedProxyHops` is wrong.
-- [ ] `aws logs tail /aws/lambda/eisenmail-inbox --since 1h` shows no errors.
+- [ ] `aws logs tail /aws/lambda/eisenmail-inbox --since 1h` shows no errors. The function
+      running every 15 minutes without any mail arriving is normal: that is the reconcile run.
+- [ ] You clicked the link in the alarm confirmation mail (step 7). The subscription shows as
+      confirmed in the SNS console under the topic `eisenmail-alerts`.
+- [ ] The rule for `dmarc@<domain>` exists with Forward and Notify off (step 8).
+- [ ] `aws s3 cp s3://$BACKUP_BUCKET/db/LATEST -` names a database dump from the last day.
+- [ ] You ran the restore drill in [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md) once.
 
 ## Day to day
 
 | Task | How |
 | --- | --- |
-| Ship a change | merge to `main`; the Deploy workflow does the rest |
+| Ship a change | merge to `main`. The Deploy workflow updates the web function, checks that it answers (which also applies any database schema change), then updates the inbox function |
 | Change a setting | rerun the step 7 command with the changed parameter |
-| Rotate the database password | change it in PostgreSQL, then `aws ssm put-parameter --overwrite ...`; the functions pick it up within minutes |
-| Rotate the tunnel key | new key pair, rerun `db-host.sh` with the new public key, overwrite `/eisenmail/tunnel_key` |
+| Get a shell on the database host | `aws ssm start-session --target $INSTANCE_ID` (find `INSTANCE_ID` as in step 8). You are `ssm-user` and can use `sudo` |
+| Rotate the database password | in that shell: `sudo ROTATE_DB_PASSWORD=1 /usr/local/sbin/eisenmail-db-host`. It stores the new password in SSM. The functions notice the old one is refused and read the new one |
+| Rotate the tunnel key | in that shell: `sudo ROTATE_TUNNEL_KEY=1 /usr/local/sbin/eisenmail-db-host`. Then rerun the Deploy workflow, so both functions start fresh and read the new key |
 | Reset your sign-in | step 8 again (also signs out every device and switches two-factor off) |
-| Database backup | snapshot the instance's volume on a schedule (Data Lifecycle Manager), or `pg_dump` to S3 |
+| Database backups | automatic: a disk snapshot every day (kept 7 days) and a dump in S3 every night (kept 90 days). `aws s3 cp s3://$BACKUP_BUCKET/db/LATEST -` shows the newest. The alarm tells you if one is missed |
+| Restore, or test a restore | [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md). Run the drill there once after setup |
+| Resize the database host, grow its disk | [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md), "Changing the database host" |
+| Operating system updates on the database host | automatic (security updates daily, with a reboot at 09:00 UTC when one is needed). Mail that arrives during a reboot is picked up afterwards by Lambda's retries and the reconcile run |
 | Roll back | **Actions, Deploy**, rerun the workflow on the earlier commit |
 
 ## What it costs
 
-Roughly: the EC2 instance and its disk (a few dollars a month), a public IPv4 address, and cents
-for Lambda, API Gateway, S3 and SES at personal volume. There is no NAT gateway, load balancer or
-managed database in this design.
+At list prices in us-east-1, for one person's mail, roughly 12 US dollars a month with the default
+`t4g.micro`, or 9 with `t4g.nano`:
+
+| Item | About, per month |
+| --- | --- |
+| EC2 instance | `t4g.micro` 6.10, `t4g.nano` 3.10 |
+| Its 20 GB disk | 1.60 |
+| Its public IPv4 address | 3.65 |
+| Disk snapshots (7 days, only changed blocks are stored) and database dumps in S3 (90 days) | well under 1.00 |
+| Alarms and the one custom metric | 0 to 1.00 |
+| Lambda, API Gateway, S3, SES, the 15 minute schedule | cents at personal volume |
+
+A new account may also get free tier credits that cover part of this. There is no NAT gateway,
+load balancer or managed database in this design. The instance runs with standard CPU credits, so
+a busy hour slows it down instead of adding to the bill.
 
 ## Removing everything
 
+Deactivate receiving and delete the application stack:
+
 ```bash
-aws ses set-active-receipt-rule-set          # deactivates receiving
-aws cloudformation delete-stack --stack-name eisenmail
-aws cloudformation delete-stack --stack-name eisenmail-bootstrap   # buckets are kept; empty and delete them by hand
+aws ses set-active-receipt-rule-set
 ```
+
+```bash
+aws cloudformation delete-stack --stack-name eisenmail
+```
+
+Copy off anything you want to keep first ([BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md)).
+The database host is protected against termination. Lift that (find `INSTANCE_ID` as in step 8),
+then delete its stack. Its disk is deleted with it.
+
+```bash
+aws ec2 modify-instance-attribute --instance-id $INSTANCE_ID --no-disable-api-termination
+```
+
+```bash
+aws cloudformation delete-stack --stack-name eisenmail-database
+```
+
+```bash
+aws cloudformation delete-stack --stack-name eisenmail-bootstrap
+```
+
+What is left on purpose, for you to delete by hand when you are sure: the four buckets (mail,
+files, public files, backups), the disk snapshots, and the parameters under `/eisenmail/` in SSM
+Parameter Store.

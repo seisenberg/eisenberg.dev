@@ -24,9 +24,16 @@ reporting for this repository (Security tab, "Report a vulnerability"), or write
 ## How the system is protected
 
 ### Sign-in and sessions
-- One login, stored as a scrypt hash. Optional TOTP two-factor (Security settings in the UI) with
-  replay protection. Turning it on, changing the password, or running `user:set` signs out every
-  other device.
+- Passwords are stored as scrypt hashes. Optional TOTP two-factor with replay protection, plus ten
+  one-time recovery codes (stored as hashes, shown once). Turning two-factor on, changing the
+  password, or running `user:set` signs out every other device.
+- **Passkeys** (WebAuthn) sign in on their own, with user verification required. Challenges are
+  single-use database rows with a five minute life. The sign-in request offers no credential list,
+  so it reveals nothing about which accounts exist. Adding a passkey needs the password again.
+- **Members** are separate sign-ins limited to chosen domains. The restriction is applied inside
+  every mail query, not in the interface: a message the member may not see answers "not found"
+  whether it is read, changed, downloaded or replied to. Members cannot use the file drop, manage
+  users, or change global settings. Owners can only be created from the command line.
 - Session cookie flags: `__Host-eisenmail`, `HttpOnly`, `Secure`, `SameSite=Strict`. A session
   lasts 30 days from its last use (so a phone in regular use stays signed in) and is extended at
   most once a day. "Sign out other devices" and a password change end the others at once.
@@ -99,7 +106,19 @@ inside attachments (photo EXIF, document properties) is not inspected. Relay tok
 - Neither bucket needs a public policy. Downloads are presigned URLs that last 60 seconds (private)
   or 5 minutes (public). Upload URLs are bound to one name, one size and one content type.
 
+### Delivery, blocking and replay (python)
+- Mail to a blocked address is dropped before anything is stored, forwarded or notified.
+- A scheduled job replays messages that reached S3 but were never processed. A replayed message
+  is never relayed as an owner reply, whatever its headers say, because the evidence SES gave at
+  delivery time (the DMARC verdict) is not available for a replay. Its verdicts are read only from
+  the header block SES itself wrote, identified by the message id, so headers supplied by the
+  sender cannot stand in for them.
+
 ### Database
+- The schema is applied by the web function at start-up when `db/schema.sql` has changed, under an
+  advisory lock. The file only ever adds.
+- Backups: the database host can write dumps to the backup bucket but cannot read or delete
+  them, so a compromised host cannot destroy its own history.
 - All SQL is parameterised. Message ids, cursors, addresses and domains are format-checked before
   they reach a query. Search input has its `LIKE` wildcards escaped.
 - Permanent deletion is only possible from Trash or Junk, so it always takes two deliberate steps.
@@ -132,46 +151,68 @@ Known and accepted:
 - Check after deploying that Security settings shows your real address under "Signed-in devices".
   If it shows a proxy address, `TRUSTED_PROXY_HOPS` is wrong for your setup.
 
+### Second review: members, passkeys, recovery codes
+
+When additional users and passkeys were added, that code was reviewed the same way. The reviewer
+confirmed that a member cannot read, change, delete or send as another domain, that every
+owner-only function is gated, and that passkey challenges, recovery codes and the start-up
+migration behave correctly under concurrency. It found six lower-severity gaps, all fixed with
+tests:
+
+| Severity | Finding | Fix |
+| --- | --- | --- |
+| Medium | Notification subscriptions and passkeys survived a password change or reset, so someone who had the old password could keep receiving mail previews or keep signing in. | A password change or reset now removes passkeys, trusted browsers and notification subscriptions. Signing out removes that device's subscription. |
+| Low | Any outside sender could plant a look-alike address at the top of recipient autocomplete. | People actually written to always rank first, and a display name that imitates an address is not shown. |
+| Low | A member could discover an address on another domain that shared a message with them, through search, folder filters or a notification. | Search, filters and notifications only ever use addresses on the member's own domains. |
+| Low | The conversation size shown to a member counted messages they could not see. | Counted per viewer. |
+| Low | A member with many devices could crowd the owner out of notifications. | At most five devices per user, owners first. |
+| Low | A member could block an address, which outlived the member. | Blocking is owner-only. Rules are capped per domain. |
+
 ## AWS settings the code relies on
 
-**Tunnel account on the database host.** Create a user that can do nothing but forward to
-postgres, and use it instead of `ubuntu`:
+The CloudFormation templates in `infra/` create all of this. It is listed here so the reasoning is
+in one place.
+
+**Database host.** PostgreSQL listens on localhost only. The functions reach it through an ssh
+account that can do exactly one thing, forward a port to PostgreSQL:
 
 ```
-# /home/tunnel/.ssh/authorized_keys
 restrict,port-forwarding,permitopen="127.0.0.1:5432",command="/bin/false" ssh-ed25519 AAAA... eisenmail
 ```
 
-Store the private key as an SSM SecureString, set `SSH_TUNNEL_KEY_SSM` to its name, and set
-`SSH_TUNNEL_HOST_KEY` to the output of `ssh-keyscan -t ed25519 <host>`. Limit port 22 on the host's
-security group as far as you can. Longer term, RDS or Aurora Serverless with IAM authentication
-removes the ssh key entirely, at higher cost. The code already supports a direct TLS connection:
-leave `SSH_TUNNEL_HOST` unset.
+The key pair is generated on the host. The private half goes straight into SSM Parameter Store
+and is deleted from the disk, so no person ever handles it. The functions pin the host's public
+key and refuse to connect to anything else. Administrative access is through Session Manager, so
+there is no personal ssh key and password logins are off. Port 22 is open to the internet because
+Lambda has no fixed addresses. The tunnel account is the only one reachable by key. The code
+also supports a direct TLS connection (RDS, for example) by leaving the tunnel unset.
 
-**Database role.** Give the application its own role with only `SELECT, INSERT, UPDATE, DELETE` on
-the eisenmail tables, not the database owner.
+**Secrets.** The database password, the tunnel key and the push signing key are SSM SecureStrings
+under `/eisenmail/`, read by the functions at runtime. None appears in a template parameter, a
+Lambda environment variable, a container image, or a GitHub secret.
 
-**IAM, web lambda:** `ses:SendEmail` and `ses:SendRawEmail` limited to your domain identities,
-`s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` on the two file prefixes, `s3:ListBucket` on those
-buckets, `s3:DeleteObject` on the mail prefix, and `ssm:GetParameter` on the one key parameter.
+**IAM, web function:** send mail through SES for the account's identities. Read, write and delete
+objects under the file drop prefixes and the `tmp/` staging prefix. List those two buckets. Delete
+raw mail objects. Read its own SSM parameters.
 
-**IAM, inbox lambda:** `s3:GetObject` on the mail prefix, `ses:SendRawEmail`, `ses:SendBounce`,
-and `ssm:GetParameter` on the one key parameter.
+**IAM, inbox function:** read and list raw mail under its prefix. Send and bounce through SES. Read
+its own SSM parameters.
 
-Both lambdas also need `ssm:GetParameter` on the VAPID private key parameter if you use push
-notifications. The inbox lambda needs outbound internet access to reach the push services.
+**IAM, database host:** write (not read, not delete) backups. Write its three SSM parameters.
+Publish one backup metric.
 
-**Secrets.** `POSTGRES_DB_PASSWORD` in the Lambda environment is visible to anyone with
-`lambda:GetFunctionConfiguration`. Keep that permission narrow, or move the value to SSM.
+**IAM, GitHub deploy role:** push images to one repository, update the code of the two functions,
+invoke the web function once per deploy for a health check. Assumable only by this repository's
+`production` environment through OIDC.
 
-**SES.** DKIM, a custom MAIL FROM and a DMARC record on every domain. Without DMARC alignment your
-relayed and webmail replies may land in spam, and other people can spoof your domains.
+**SES.** DKIM, a custom MAIL FROM and a DMARC record on every domain. Without DMARC alignment
+relayed and webmail replies may land in spam, and other people can spoof the domains.
 
-**S3.** Block Public Access on for every bucket. Default encryption on. Versioning on for the file
-drop if you want protection from accidental deletes. CORS on the private bucket limited to your
-site's origin, method `PUT`.
+**S3.** Block Public Access on every bucket, default encryption, TLS-only bucket policies. The file
+drop is versioned. Browser uploads are limited by CORS to the site's own origin.
 
-**Front door.** If you put CloudFront in front, set `TRUSTED_PROXY_HOPS=2` and allow only
-CloudFront to invoke the function URL (origin access control), so nothing can reach it directly. Add an AWS WAF rate
-rule on `/api/auth/login` and `/public/*` if you see abuse. Lambda reserved concurrency caps the
-cost of a flood.
+**Front door.** API Gateway throttles requests, which caps what a flood can cost. If CloudFront is
+ever put in front, set `TrustedProxyHops=2` and allow only CloudFront to reach the API.
+
+**Alarms.** Function errors, API 5xx responses, SES bounce and complaint rates, and a missing
+nightly backup all notify the address given as `AlertEmail`.

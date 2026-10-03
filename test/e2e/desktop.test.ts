@@ -114,18 +114,83 @@ test('search and keyboard navigation', async () => {
   await page.keyboard.press('s');
 });
 
-test('delivery rules: forward, notify and forward style per address', async () => {
+test('conversation view, image preview, mark all as read', async () => {
+  await press(page, 'nav button', 'All Inboxes');
+  await press(page, '[role=option]', 'scope question');
+  await page.waitForFunction(() => document.body.innerText.includes('2 messages in this conversation'));
+  // the reply sent from the webmail is part of the conversation; opening it shows its text
+  await press(page, 'article section button', 'You (hello@quartzworks.example)');
+  await page.waitForFunction(() => document.body.innerText.includes('Redshift workloads are in scope'));
+
+  await press(page, '[role=option]', 'Logo concepts');
+  const thumb = await page.waitForSelector('button[aria-label="Preview concept-1.png"] img');
+  assert.ok(await thumb!.evaluate((img) => (img as HTMLImageElement).complete && (img as HTMLImageElement).naturalWidth > 0), 'image attachment is shown in place');
+
+  await pressLabel(page, 'Mailbox actions');
+  await press(page, '[role=menuitem]', 'Mark all as read');
+  await page.waitForFunction(() => document.querySelectorAll('[role=option] [aria-label=Unread]').length === 0);
+});
+
+test('drafts are saved while typing and can be continued; recipients autocomplete', async () => {
+  await page.keyboard.press('n');
+  await page.waitForSelector('#c-to');
+  await page.type('#c-to', 'jane');
+  await press(page, '#c-to-suggestions [role=option]', 'jane.park@northwind.example');
+  assert.equal(await page.$eval('#c-to', (e) => (e as HTMLInputElement).value), 'jane.park@northwind.example, ');
+  await page.type('#c-subject', 'Half written');
+  await page.waitForFunction(() => document.body.innerText.includes('Draft saved'), { timeout: 8000 });
+  await pressLabel(page, 'Close'); // the confirm dialog is accepted: keep the draft
+  await press(page, 'nav button', 'Drafts');
+  await press(page, '[role=listitem] button', 'Half written');
+  await page.waitForSelector('#c-subject');
+  assert.equal(await page.$eval('#c-subject', (e) => (e as HTMLInputElement).value), 'Half written');
+  await page.focus('textarea[aria-label=Message]');
+  await page.keyboard.type('Now finished.');
+  await press(page, 'button', 'Send');
+  await page.waitForFunction(() => document.body.innerText.includes('Message sent'));
+  await page.waitForFunction(() => document.body.innerText.includes('No Drafts'));
+});
+
+test('addresses: forward, forward style, note and block', async () => {
   await press(page, '[data-slot=dropdown-menu-trigger]', 'sam');
-  await press(page, '[role=menuitem]', 'Forwarding');
+  await press(page, '[role=menuitem]', 'Mail settings');
   await page.waitForFunction(() => document.body.innerText.includes('New addresses'));
   await pressLabel(page, 'Forward newsletters@eisenberg.dev');
   await pressLabel(page, 'Forward style for github@eisenberg.dev');
+  await pressLabel(page, 'More for shopping@eisenberg.dev');
+  await press(page, '[role=menuitem]', 'Block this address');
+  await page.waitForFunction(() => document.body.innerText.includes('Blocked'));
   await sleep(400);
-  const rules = await page.evaluate(async () => (await (await fetch('/api/mail/rules')).json()).rules as { address: string; forward: boolean; forwardStyle: string }[]);
+  const rules = await page.evaluate(async () => (await (await fetch('/api/mail/rules')).json()).rules as { address: string; forward: boolean; forwardStyle: string; blocked: boolean }[]);
   assert.equal(rules.find((r) => r.address === 'newsletters@eisenberg.dev')!.forward, false);
   assert.equal(rules.find((r) => r.address === 'github@eisenberg.dev')!.forwardStyle, 'attach');
   assert.equal(rules.find((r) => r.address === 'bank@eisenberg.dev')!.forwardStyle, 'inline');
+  assert.equal(rules.find((r) => r.address === 'shopping@eisenberg.dev')!.blocked, true);
   await page.keyboard.press('Escape');
+});
+
+test('passkey: register, sign out, sign in without a password', async () => {
+  const cdp = await page.createCDPSession();
+  await cdp.send('WebAuthn.enable');
+  await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
+  });
+  await press(page, '[data-slot=dropdown-menu-trigger]', 'sam');
+  await press(page, '[role=menuitem]', 'Security');
+  await page.waitForSelector('#pk-pw');
+  await page.type('#pk-pw', (await import('../../scripts/seed.js')).DEV_USER.password);
+  await press(page, 'button', 'Add passkey');
+  await page.waitForFunction(() => document.body.innerText.includes('Passkey added'), { timeout: 10000 });
+  await page.keyboard.press('Escape');
+
+  await press(page, '[data-slot=dropdown-menu-trigger]', 'sam');
+  await press(page, '[role=menuitem]', 'Sign out');
+  await page.waitForSelector('#username');
+  await press(page, 'button', 'Sign in with a passkey');
+  await page.waitForFunction(() => location.pathname === '/mail', { timeout: 10000 });
+  await page.waitForSelector('[role=option]');
+  const me = await page.evaluate(async () => (await fetch('/api/auth/me')).json());
+  assert.equal(me.username, 'sam');
 });
 
 test('file drop: upload, private by default, public link on demand', async () => {

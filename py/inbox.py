@@ -7,6 +7,7 @@ Per SES record:
   authorised reply to reply-<token>@domain from the owner
                                  -> rewritten and sent to the correspondent from the alias,
                                     stored as kind='relay_out'
+  recipient with a blocked rule  -> removed from the message; nothing left -> 'blocked', not stored
   everything else                -> stored as kind='inbound'; then, depending on the delivery
                                     rules of the receiving address(es) (address_rules, created
                                     from mail_settings on first mail):
@@ -152,7 +153,24 @@ class Processor:
         return outcomes
 
     # ------------------------------------------------------------------------------------
-    def process_record(self, record: Mapping) -> str:
+    def process_record(self, record: Mapping, *, replay: bool = False) -> str:
+        """Handle one SES record and write its outcome to the delivery log (inbox_log). A record
+        that raises logs nothing, so the scheduled reconcile run can replay it.
+
+        `replay=True` is the reconcile path: the notification was rebuilt from the stored message,
+        not sent by SES. Such a message is never relayed as an owner reply and never bounced, and
+        it is junk when its virus verdict is unknown."""
+        outcome = self._process(record, replay)
+        self._log_outcome(str(record["ses"]["mail"]["messageId"]), outcome)
+        return outcome
+
+    def _log_outcome(self, message_id: str, outcome: str) -> None:
+        try:
+            self.db.log_outcome(message_id, outcome)
+        except Exception as exc:  # the log must never fail a record that was handled
+            log.error("record %s: could not write the delivery log (%s)", message_id, type(exc).__name__)
+
+    def _process(self, record: Mapping, replay: bool) -> str:
         notification = record["ses"]
         mail = notification.get("mail") or {}
         receipt = notification.get("receipt") or {}
@@ -170,24 +188,44 @@ class Processor:
         if not domain:
             raise ValueError("record has no recipients and MAIL_DOMAINS is not set")
 
-        if failed("dmarcVerdict") and relay.verdict(receipt, "dmarcPolicy") == "REJECT":
+        if not replay and failed("dmarcVerdict") and relay.verdict(receipt, "dmarcPolicy") == "REJECT":
             self._bounce(message_id, domain, receipt)
             return "bounced"
+
+        # Blocked addresses: as if the mail had never been addressed to them.
+        blocked = self._blocked(recipients)
+        if blocked:
+            recipients = [r for r in recipients if r not in blocked]
+            log.info("record %s: %d blocked recipient(s) removed", message_id, len(blocked))
+            if not recipients:
+                return "blocked"
+            kept = [r for r in (receipt.get("recipients") or []) if str(r).strip().lower() not in blocked]
+            receipt = {**receipt, "recipients": kept}
+            notification = {**notification, "receipt": receipt}
+            alias = relay.pick_alias(recipients, self.cfg.mail_domains)
+            domain = relay.domain_of(alias) if alias else self.cfg.fallback_domain or domain
+        base_meta = {"blocked_recipients": sorted(blocked)} if blocked else None
 
         key = self.cfg.mail_prefix + message_id
         raw = self.s3.get_object(Bucket=self.cfg.mail_bucket, Key=key)["Body"].read()
         msg = relay.parse(raw)
 
-        if failed("spfVerdict") or failed("dkimVerdict") or failed("spamVerdict"):
-            self.db.insert_inbox(message_id, key, notification, raw, "junk")
+        virus_unknown = replay and "virusVerdict" not in receipt
+        if failed("spfVerdict") or failed("dkimVerdict") or failed("spamVerdict") or virus_unknown:
+            self.db.insert_inbox(message_id, key, notification, raw, "junk", base_meta)
             return "junk"
 
         loop = None
         relay_rcpt = relay.find_relay_recipient(recipients, self.cfg.mail_domains)
         if relay_rcpt is not None:
             token, relay_addr = relay_rcpt
-            common_from = (mail.get("commonHeaders") or {}).get("from")
-            reason = relay.relay_refusal_reason(msg, receipt, self.cfg.owner_addresses, ses_from=common_from)
+            if replay:
+                # The DMARC evidence was reconstructed from the stored message, it is not SES's
+                # own event: a replayed message is never trusted as an owner reply.
+                reason: Optional[str] = "replayed message"
+            else:
+                common_from = (mail.get("commonHeaders") or {}).get("from")
+                reason = relay.relay_refusal_reason(msg, receipt, self.cfg.owner_addresses, ses_from=common_from)
             token_row = None
             if reason is None:
                 token_row = self.db.get_token(token)
@@ -205,7 +243,20 @@ class Processor:
                 # limits never kick in. Store it, do not forward it.
                 log.warning("record %s: automatic mail to a relay address (%s); not forwarded", message_id, loop)
 
-        return self._inbound(message_id, key, notification, raw, msg, recipients, alias, domain, loop)
+        return self._inbound(message_id, key, notification, raw, msg, recipients, alias, domain, loop, base_meta)
+
+    def _ours(self, recipients) -> List[str]:
+        """The recipients on our receiving domains (all of them when MAIL_DOMAINS is unset)."""
+        domains = self.cfg.mail_domains
+        return [r for r in dict.fromkeys(recipients) if "@" in r and (not domains or relay.domain_of(r) in domains)]
+
+    def _blocked(self, recipients) -> set:
+        """Blocked recipients (each hit is counted). Only an existing rule can block: relay-shaped
+        addresses have no rule, and an address seen for the first time is not blocked."""
+        ordinary = [r for r in self._ours(recipients) if not relay.RELAY_LOCAL_RE.match(r.rpartition("@")[0])]
+        if not ordinary:
+            return set()
+        return {str(address).lower() for address in self.db.record_blocked(ordinary)}
 
     # ------------------------------------------------------------------------------------
     def _bounce(self, message_id: str, domain: str, receipt: Mapping) -> None:
@@ -225,13 +276,14 @@ class Processor:
         )
 
     # ------------------------------------------------------------------------------------
-    def _inbound(self, message_id, key, notification, raw, msg, recipients, alias, domain, loop) -> str:
+    def _inbound(self, message_id, key, notification, raw, msg, recipients, alias, domain, loop, base_meta=None) -> str:
         """Store, then forward (when the address rules say so), then notify (when they say so).
 
         Each finished step leaves a key in the row's meta, so a Lambda retry only redoes what is
         missing:  forwarded: true | false (+ forward_skipped: "rule" | "loop"),  notified: true | false.
+        `base_meta` (blocked_recipients) is written with the row itself.
         """
-        inserted = self.db.insert_inbox(message_id, key, notification, raw, "inbound")
+        inserted = self.db.insert_inbox(message_id, key, notification, raw, "inbound", base_meta)
         meta: Mapping[str, Any] = {}
         if not inserted:
             state = self.db.get_inbox_meta(message_id)
@@ -261,7 +313,8 @@ class Processor:
         if "notified" not in meta:
             # Automatic mail to a relay address (an out-of-office or bounce answering a forward) is
             # stored but is not worth a notification.
-            self._notify_step(message_id, msg, alias or (recipients[0] if recipients else ""), domain, want_notify and not loop)
+            self._notify_step(message_id, msg, alias or (recipients[0] if recipients else ""), domain,
+                              want_notify and not loop, recipients)
 
         if forward_error is not None:
             raise forward_error
@@ -278,8 +331,7 @@ class Processor:
         The style is that of the address the forward is made for: the primary alias (our first
         recipient) when its rule forwards, otherwise the first recipient in envelope order whose
         rule forwards. Unknown values are 'inline'."""
-        domains = self.cfg.mail_domains
-        ours = [r for r in dict.fromkeys(recipients) if "@" in r and (not domains or relay.domain_of(r) in domains)]
+        ours = self._ours(recipients)
         defaults = None
         rules = []
         for address in ours:
@@ -294,13 +346,27 @@ class Processor:
         style = relay.normalize_forward_style(forwarding[0].get("forward_style")) if forwarding else "inline"
         return bool(forwarding), any(rule["notify"] for rule in rules), style
 
-    def _notify_step(self, message_id, msg, alias, domain, want_notify) -> None:
+    def _notify_step(self, message_id, msg, alias, domain, want_notify, recipients=()) -> None:
         """Web Push. Nothing in here may fail the record or hold up the forward."""
         try:
             notified = False
             if want_notify and self.notifier is not None:
-                payload = push.build_payload(msg, alias, message_id)
-                counts = self.notifier.notify(self.db, payload, self.cfg.fallback_domain or domain)
+                ours = self._ours(recipients)
+
+                def alias_for(scope):
+                    # An owner sees the primary alias. A member is shown the first recipient on one
+                    # of their own domains: the message may also have gone to an address on a domain
+                    # the member must not learn about.
+                    if scope is None:
+                        return alias
+                    return next((r for r in ours if relay.domain_of(r) in scope), "")
+
+                counts = self.notifier.notify(
+                    self.db,
+                    lambda badge, scope=None: push.build_payload(msg, alias_for(scope), message_id, badge),
+                    self.cfg.fallback_domain or domain,
+                    recipient_domains={relay.domain_of(r) for r in ours},
+                )
                 log.info("record %s: push %s", message_id, counts)
                 notified = True
             self.db.merge_inbox_meta(message_id, {"notified": notified})
@@ -416,5 +482,12 @@ class Processor:
 
 
 def lambda_handler(event, context):
-    Processor(get_config(), get_s3(), get_ses(), get_db(), notifier=get_notifier()).process_event(event)
+    """SES events ({"Records": [...]}) are processed; the scheduled {"eisenmail": "reconcile"}
+    event replays stored mail that was never processed (see reconcile.py)."""
+    processor = Processor(get_config(), get_s3(), get_ses(), get_db(), notifier=get_notifier())
+    if isinstance(event, Mapping) and "Records" not in event and event.get("eisenmail") == "reconcile":
+        import reconcile
+
+        return reconcile.run(processor, context)
+    processor.process_event(event)
     return None

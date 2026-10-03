@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, ShieldCheck } from "lucide-react";
+import { startRegistration } from "@simplewebauthn/browser";
+import { Copy, KeyRound, Loader2, ShieldCheck, Trash2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -8,7 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { get, post } from "@/lib/api";
 import { fullDate } from "@/lib/format";
-import type { SessionInfo, SessionUser } from "../../shared/api";
+import { currentSubscription } from "@/lib/pwa";
+import { useIdentities } from "../mail/data";
+import type { PasskeyInfo, SessionInfo, SessionUser, UserInfo } from "../../shared/api";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -20,12 +23,15 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function PasswordSection() {
+  const qc = useQueryClient();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const change = useMutation({
     mutationFn: () => post("/auth/password", { currentPassword: current, newPassword: next }),
     onSuccess: () => {
-      toast.success("Password changed. Other devices were signed out.");
+      toast.success("Password changed. Other devices were signed out, and passkeys and notifications were removed. Add them again from this device.", { duration: 10000 });
+      void qc.invalidateQueries({ queryKey: ["passkeys"] });
+      void qc.invalidateQueries({ queryKey: ["push"] });
       setCurrent("");
       setNext("");
     },
@@ -51,11 +57,26 @@ function PasswordSection() {
   );
 }
 
+function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) {
+  return (
+    <div className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+      <p className="font-medium">Save these recovery codes now. They are shown only once.</p>
+      <p className="text-muted-foreground">Each code signs you in one time in place of the authenticator code, for when you lose your phone.</p>
+      <pre className="bg-background grid grid-cols-2 gap-x-6 gap-y-1 rounded border p-3 font-mono text-[13px]">{codes.map((c) => <span key={c}>{c}</span>)}</pre>
+      <div className="flex gap-2">
+        <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(codes.join("\n")).then(() => toast.success("Recovery codes copied"), () => toast.error("Could not copy"))}><Copy /> Copy</Button>
+        <Button size="sm" onClick={onDone}>I have saved them</Button>
+      </div>
+    </div>
+  );
+}
+
 function TwoFactorSection({ user }: { user: SessionUser }) {
   const qc = useQueryClient();
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState<{ secret: string; uri: string } | null>(null);
   const [code, setCode] = useState("");
+  const [recovery, setRecovery] = useState<string[] | null>(null);
   const done = (totpEnabled: boolean, message: string) => {
     qc.setQueryData<SessionUser | null>(["session"], (s) => (s ? { ...s, totpEnabled } : s));
     toast.success(message);
@@ -69,8 +90,19 @@ function TwoFactorSection({ user }: { user: SessionUser }) {
     onError: (err) => toast.error((err as Error).message),
   });
   const enable = useMutation({
-    mutationFn: () => post("/auth/totp/enable", { code }),
-    onSuccess: () => done(true, "Two-factor authentication is on"),
+    mutationFn: () => post<{ recoveryCodes: string[] }>("/auth/totp/enable", { code }),
+    onSuccess: (r) => {
+      setRecovery(r.recoveryCodes);
+      done(true, "Two-factor authentication is on");
+    },
+    onError: (err) => toast.error((err as Error).message),
+  });
+  const regenerate = useMutation({
+    mutationFn: () => post<{ recoveryCodes: string[] }>("/auth/recovery-codes", { currentPassword: password }),
+    onSuccess: (r) => {
+      setRecovery(r.recoveryCodes);
+      setPassword("");
+    },
     onError: (err) => toast.error((err as Error).message),
   });
   const disable = useMutation({
@@ -81,14 +113,17 @@ function TwoFactorSection({ user }: { user: SessionUser }) {
 
   return (
     <Section title="Two-factor authentication">
-      {user.totpEnabled ? (
+      {recovery ? (
+        <RecoveryCodes codes={recovery} onDone={() => setRecovery(null)} />
+      ) : user.totpEnabled ? (
         <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); disable.mutate(); }}>
-          <p className="flex items-center gap-2 text-green-700 dark:text-green-400"><ShieldCheck className="size-4" /> On. Signing in requires a code from your authenticator app.</p>
-          <div className="flex items-end gap-2">
-            <div className="flex-1 space-y-1.5">
-              <Label htmlFor="tf-pw">Password, to turn it off</Label>
+          <p className="flex items-center gap-2 text-green-700 dark:text-green-400"><ShieldCheck className="size-4" /> On. Signing in requires a code from your authenticator app, or a recovery code.</p>
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-40 flex-1 space-y-1.5">
+              <Label htmlFor="tf-pw">Password, to change this</Label>
               <Input id="tf-pw" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
             </div>
+            <Button type="button" variant="outline" size="sm" disabled={regenerate.isPending || !password} onClick={() => regenerate.mutate()}>New recovery codes</Button>
             <Button type="submit" variant="outline" size="sm" disabled={disable.isPending}>Turn off</Button>
           </div>
         </form>
@@ -124,11 +159,144 @@ function TwoFactorSection({ user }: { user: SessionUser }) {
   );
 }
 
+function PasskeysSection() {
+  const qc = useQueryClient();
+  const [password, setPassword] = useState("");
+  const keys = useQuery({ queryKey: ["passkeys"], queryFn: () => get<PasskeyInfo[]>("/auth/passkeys") });
+  const supported = typeof window !== "undefined" && "PublicKeyCredential" in window;
+  const add = useMutation({
+    mutationFn: async () => {
+      const options = await post<Parameters<typeof startRegistration>[0]["optionsJSON"]>("/auth/passkeys/register-options", { currentPassword: password });
+      const response = await startRegistration({ optionsJSON: options });
+      const device = /iPhone|iPad/.test(navigator.userAgent) ? "iPhone or iPad" : /Mac/.test(navigator.userAgent) ? "Mac" : /Android/.test(navigator.userAgent) ? "Android" : /Windows/.test(navigator.userAgent) ? "Windows" : "Passkey";
+      await post("/auth/passkeys/register", { response, name: `${device}, added ${new Date().toLocaleDateString()}` });
+    },
+    onSuccess: () => {
+      toast.success("Passkey added");
+      setPassword("");
+    },
+    onError: (err) => toast.error((err as Error).name === "NotAllowedError" ? "The passkey prompt was cancelled" : (err as Error).message),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["passkeys"] }),
+  });
+  const remove = useMutation({ mutationFn: (id: string) => post("/auth/passkeys/delete", { id }), onSettled: () => qc.invalidateQueries({ queryKey: ["passkeys"] }) });
+  return (
+    <Section title="Passkeys">
+      <p className="text-muted-foreground">Sign in with Face ID, Touch ID or your device PIN instead of typing a password and a code. A passkey only works on this site, so it cannot be phished.</p>
+      {(keys.data?.length ?? 0) > 0 && (
+        <ul className="divide-y rounded-md border">
+          {keys.data!.map((k) => (
+            <li key={k.id} className="flex items-center gap-2 py-1.5 pr-1 pl-3">
+              <KeyRound className="text-muted-foreground size-4 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate">{k.name}</div>
+                <div className="text-muted-foreground text-xs">{k.lastUsedAt ? `last used ${fullDate(k.lastUsedAt)}` : "not used yet"}</div>
+              </div>
+              <Button variant="ghost" size="icon-sm" aria-label={`Remove ${k.name}`} className="text-muted-foreground hover:text-destructive" onClick={() => window.confirm("Remove this passkey?") && remove.mutate(k.id)}><Trash2 /></Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {supported ? (
+        <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); add.mutate(); }}>
+          <div className="flex-1 space-y-1.5">
+            <Label htmlFor="pk-pw">Password, to add a passkey on this device</Label>
+            <Input id="pk-pw" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+          </div>
+          <Button type="submit" size="sm" disabled={add.isPending}>{add.isPending && <Loader2 className="animate-spin" />} Add passkey</Button>
+        </form>
+      ) : (
+        <p className="text-muted-foreground">This browser does not support passkeys.</p>
+      )}
+    </Section>
+  );
+}
+
+function UsersSection({ me }: { me: SessionUser }) {
+  const qc = useQueryClient();
+  const users = useQuery({ queryKey: ["users"], queryFn: () => get<UserInfo[]>("/users") });
+  const identities = useIdentities();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [domains, setDomains] = useState<string[]>([]);
+  const all = identities.data?.domains ?? [];
+  const settle = { onError: (err: unknown) => toast.error((err as Error).message), onSettled: () => qc.invalidateQueries({ queryKey: ["users"] }) };
+  const create = useMutation({
+    mutationFn: () => post("/users", { username, password, domains }),
+    onSuccess: () => {
+      toast.success(`${username} can now sign in`);
+      setUsername("");
+      setPassword("");
+      setDomains([]);
+    },
+    ...settle,
+  });
+  const update = useMutation({ mutationFn: (v: { id: number; domains?: string[]; password?: string }) => post("/users/update", v), ...settle });
+  const remove = useMutation({ mutationFn: (id: number) => post("/users/delete", { id }), ...settle });
+  const toggle = (list: string[], d: string) => (list.includes(d) ? list.filter((x) => x !== d) : [...list, d]);
+
+  return (
+    <Section title="People">
+      <p className="text-muted-foreground">A member signs in separately and sees only the mail of the domains you choose: no other domains, no file drop, no settings for other addresses. Whether a message is read, flagged or archived is shared by everyone who can see it.</p>
+      <ul className="divide-y rounded-md border">
+        {users.data?.map((u) => (
+          <li key={u.id} className="space-y-1.5 px-3 py-2">
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate font-medium">{u.username}</span>
+              <span className="text-muted-foreground text-xs">{u.role === "owner" ? (u.username === me.username ? "Owner (you)" : "Owner") : "Member"}</span>
+              {u.role === "member" && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    onClick={() => {
+                      const next = window.prompt(`New password for ${u.username} (12 characters or more).\nThis signs them out everywhere and removes their two-factor and passkeys.`);
+                      if (next) update.mutate({ id: u.id, password: next });
+                    }}
+                  >
+                    Reset password
+                  </Button>
+                  <Button variant="ghost" size="icon-sm" aria-label={`Remove ${u.username}`} className="text-muted-foreground hover:text-destructive" onClick={() => window.confirm(`Remove ${u.username}? They will be signed out at once.`) && remove.mutate(u.id)}><Trash2 /></Button>
+                </>
+              )}
+            </div>
+            {u.role === "member" && (
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                {all.map((d) => (
+                  <label key={d} className="flex items-center gap-1.5 text-xs">
+                    <input type="checkbox" checked={u.domains?.includes(d) ?? false} onChange={() => { const next = toggle(u.domains ?? [], d); if (next.length) update.mutate({ id: u.id, domains: next }); else toast.error("A member needs at least one domain"); }} />
+                    {d}
+                  </label>
+                ))}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+      <form className="space-y-2 rounded-md border p-3" onSubmit={(e) => { e.preventDefault(); create.mutate(); }}>
+        <div className="flex items-center gap-2 font-medium"><UserPlus className="size-4" /> Add a member</div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Input aria-label="Username" placeholder="Username" autoCapitalize="none" autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} required />
+          <Input aria-label="Temporary password" placeholder="Temporary password (12+ characters)" type="password" autoComplete="new-password" minLength={12} value={password} onChange={(e) => setPassword(e.target.value)} required />
+        </div>
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {all.map((d) => (
+            <label key={d} className="flex items-center gap-1.5">
+              <input type="checkbox" checked={domains.includes(d)} onChange={() => setDomains(toggle(domains, d))} />
+              {d}
+            </label>
+          ))}
+        </div>
+        <Button type="submit" size="sm" variant="outline" disabled={create.isPending || domains.length === 0 || password.length < 12 || !username.trim()}>Add member</Button>
+      </form>
+    </Section>
+  );
+}
+
 function SessionsSection() {
   const qc = useQueryClient();
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionInfo[]>("/auth/sessions") });
   const revoke = useMutation({
-    mutationFn: () => post("/auth/sessions/revoke-others"),
+    mutationFn: async () => post("/auth/sessions/revoke-others", { keepPushEndpoint: (await currentSubscription().catch(() => null))?.endpoint }),
     onSuccess: () => {
       toast.success("Other devices were signed out");
       qc.invalidateQueries({ queryKey: ["sessions"] });
@@ -158,13 +326,15 @@ export default function SettingsDialog({ user, onClose }: { user: SessionUser; o
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto text-[13px] sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Security settings</DialogTitle>
+          <DialogTitle>Security{user.role === "owner" ? " and people" : ""}</DialogTitle>
           <DialogDescription>Signed in as {user.username}</DialogDescription>
         </DialogHeader>
         <div className="min-w-0 space-y-5">
+          <PasskeysSection />
           <PasswordSection />
           <TwoFactorSection user={user} />
           <SessionsSection />
+          {user.role === "owner" && <UsersSection me={user} />}
         </div>
       </DialogContent>
     </Dialog>

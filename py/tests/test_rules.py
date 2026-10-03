@@ -306,7 +306,7 @@ def test_notify_sends_the_payload_to_every_subscription(processor, s3, ses, db, 
     call = send.calls[0]
     assert json.loads(call["payload"]) == {
         "title": "Bob Smith", "body": "Hello about the bike", "address": ALIAS,
-        "url": "/mail?box=inbox&address=cool_stuff%40eisenberg.dev", "tag": "in-1",
+        "url": "/mail?box=inbox&address=cool_stuff%40eisenberg.dev", "tag": "in-1", "badge": 1,
     }
     assert call["ttl"] == 86400 and call["timeout"] == 5.0
     assert call["subject"] == f"mailto:postmaster@{DOMAIN}"

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { Loader2, Lock } from "lucide-react";
+import { startAuthentication } from "@simplewebauthn/browser";
+import { KeyRound, Loader2, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,6 +22,24 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
 
   if (session.data) return <Navigate to="/mail" replace />;
+
+  const passkeysSupported = typeof window !== "undefined" && "PublicKeyCredential" in window;
+  async function passkey() {
+    setBusy(true);
+    setError(null);
+    try {
+      const options = await post<Parameters<typeof startAuthentication>[0]["optionsJSON"]>("/auth/passkey/login-options");
+      const response = await startAuthentication({ optionsJSON: options });
+      const user = await post<SessionUser>("/auth/passkey/login", { response });
+      queryClient.setQueryData(["session"], user);
+      navigate("/mail", { replace: true });
+    } catch (err) {
+      // cancelling the system prompt is not an error worth showing
+      if ((err as Error).name !== "NotAllowedError") setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -64,7 +83,7 @@ export default function Login() {
             {needsCode && (
               <div className="space-y-1.5">
                 <Label htmlFor="code">Authentication code</Label>
-                <Input id="code" name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9 ]*" maxLength={7} placeholder="6 digit code" autoFocus required value={code} onChange={(e) => setCode(e.target.value)} disabled={busy} />
+                <Input id="code" name="code" autoComplete="one-time-code" autoCapitalize="none" maxLength={24} placeholder="6 digit code, or a recovery code" autoFocus required value={code} onChange={(e) => setCode(e.target.value)} disabled={busy} />
               </div>
             )}
             {error && <p role="alert" className="text-destructive">{error}</p>}
@@ -72,6 +91,12 @@ export default function Login() {
               {busy && <Loader2 className="animate-spin" />} Sign in
             </Button>
           </form>
+          {passkeysSupported && (
+            <>
+              <div className="text-muted-foreground my-4 flex items-center gap-3 text-xs"><span className="bg-border h-px flex-1" />or<span className="bg-border h-px flex-1" /></div>
+              <Button type="button" variant="outline" className="w-full" disabled={busy} onClick={() => void passkey()}><KeyRound /> Sign in with a passkey</Button>
+            </>
+          )}
         </div>
         <p className="text-muted-foreground mt-6 text-center">
           <Link to="/" className="hover:text-foreground">Back to eisenberg.dev</Link>

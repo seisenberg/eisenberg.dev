@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { Context, Next } from 'koa';
 import config from './config.js';
 import { query, tx, type Queryable } from './db.js';
+import type { Viewer } from './mail.js';
 import type { SessionInfo, SessionUser } from '../shared/api.js';
 
 // ------------------------------------------------------------------------------------------------
@@ -168,6 +169,8 @@ interface SessionRow {
   user_id: number;
   username: string;
   totp_secret: string | null;
+  role: 'owner' | 'member';
+  domains: string[] | null;
   stale: boolean;
 }
 
@@ -175,8 +178,24 @@ export interface AuthState {
   userId: number;
   username: string;
   totpEnabled: boolean;
+  role: 'owner' | 'member';
+  /** null for an owner (all domains); the allowed domains for a member */
+  domains: string[] | null;
   tokenHash: Buffer;
 }
+
+/** What the signed-in user may see. A member with no domains sees nothing. */
+export function viewerOf(ctx: Context): Viewer {
+  const a = ctx.state.auth as AuthState;
+  return { userId: a.userId, owner: a.role === 'owner', domains: a.role === 'owner' ? null : (a.domains ?? []) };
+}
+
+const sessionUser = (a: Pick<AuthState, 'username' | 'totpEnabled' | 'role' | 'domains'>): SessionUser => ({
+  username: a.username,
+  totpEnabled: a.totpEnabled,
+  role: a.role,
+  domains: a.role === 'owner' ? null : (a.domains ?? []),
+});
 
 async function createSession(ctx: Context, userId: number): Promise<void> {
   const token = crypto.randomBytes(32).toString('base64url');
@@ -195,7 +214,7 @@ async function loadSession(ctx: Context): Promise<AuthState | null> {
   const tokenHash = hashToken(token);
   const ttl = config.session.ttlHours * 3600;
   const res = await query<SessionRow & { renew: boolean }>(
-    `select s.token_hash, s.user_id, u.email as username, u.totp_secret,
+    `select s.token_hash, s.user_id, u.email as username, u.totp_secret, u.role, u.domains,
             s.last_seen_at < now() - interval '1 minute' as stale,
             s.expires_at < now() + make_interval(secs => $2) - interval '1 day' as renew
        from webmail_sessions s join webmail_users u on u.id = s.user_id
@@ -212,7 +231,24 @@ async function loadSession(ctx: Context): Promise<AuthState | null> {
   } else if (row.stale) {
     await query('update webmail_sessions set last_seen_at = now() where token_hash = $1', [tokenHash]);
   }
-  return { userId: row.user_id, username: row.username, totpEnabled: !!row.totp_secret, tokenHash };
+  return { userId: row.user_id, username: row.username, totpEnabled: !!row.totp_secret, role: row.role, domains: row.domains, tokenHash };
+}
+
+/** User management, the file drop and global mail settings belong to owners. */
+export async function requireOwner(ctx: Context, next: Next): Promise<void> {
+  if ((ctx.state.auth as AuthState | undefined)?.role !== 'owner') {
+    ctx.status = 403;
+    ctx.body = { error: 'Only the owner can do this', code: 'forbidden' };
+    return;
+  }
+  await next();
+}
+
+/** Used by every way of signing in (password, passkey): new session, and remember this browser. */
+export async function startSession(ctx: Context, userId: number, username: string): Promise<void> {
+  const known = await isKnownDevice(ctx, username);
+  await createSession(ctx, userId);
+  if (!known) await rememberDevice(ctx, userId);
 }
 
 export async function requireAuth(ctx: Context, next: Next): Promise<void> {
@@ -348,8 +384,8 @@ export async function login(ctx: Context): Promise<void> {
     return fail(ctx, 429, 'Too many failed sign-in attempts. Try again later.', 'throttled');
   }
 
-  const res = await query<{ id: number; passhash: string | null; totp_secret: string | null; totp_last_step: string | null }>(
-    'select id, passhash, totp_secret, totp_last_step from webmail_users where lower(email) = $1',
+  const res = await query<{ id: number; passhash: string | null; totp_secret: string | null; totp_last_step: string | null; role: 'owner' | 'member'; domains: string[] | null }>(
+    'select id, passhash, totp_secret, totp_last_step, role, domains from webmail_users where lower(email) = $1',
     [username],
   );
   const user = res.rows[0];
@@ -367,25 +403,62 @@ export async function login(ctx: Context): Promise<void> {
     const claimed =
       step !== null &&
       ((await query('update webmail_users set totp_last_step = $2 where id = $1 and (totp_last_step is null or totp_last_step < $2)', [user.id, step])).rowCount ?? 0) > 0;
-    if (!claimed) return fail(ctx, 401, 'That code is not valid', 'bad_totp');
+    // A recovery code stands in for the authenticator, once.
+    if (!claimed && !(await useRecoveryCode(user.id, code))) return fail(ctx, 401, 'That code is not valid', 'bad_totp');
   }
 
   await attemptSucceeded(attempt, username, ip);
   await createSession(ctx, user.id);
   if (!knownDevice) await rememberDevice(ctx, user.id);
-  ctx.body = { username, totpEnabled: !!user.totp_secret } satisfies SessionUser;
+  ctx.body = sessionUser({ username, totpEnabled: !!user.totp_secret, role: user.role, domains: user.domains });
+}
+
+// ------------------------------------------------------------------------------------------------
+// Recovery codes: ten one-time codes issued with two-factor, for when the authenticator is lost
+// ------------------------------------------------------------------------------------------------
+
+const RECOVERY_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'; // no look-alikes
+const normaliseRecovery = (code: string) => code.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+async function issueRecoveryCodes(userId: number): Promise<string[]> {
+  const codes = Array.from({ length: 10 }, () => {
+    const raw = Array.from(crypto.randomBytes(16), (b) => RECOVERY_ALPHABET[b % RECOVERY_ALPHABET.length]).join('');
+    return `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}-${raw.slice(12, 16)}`;
+  });
+  await query('delete from webmail_recovery_codes where user_id = $1', [userId]);
+  for (const code of codes) {
+    await query('insert into webmail_recovery_codes (code_hash, user_id) values ($1, $2)', [hashToken(normaliseRecovery(code)), userId]);
+  }
+  return codes;
+}
+
+async function useRecoveryCode(userId: number, code: string): Promise<boolean> {
+  const clean = normaliseRecovery(code);
+  if (clean.length !== 16) return false;
+  const res = await query('update webmail_recovery_codes set used_at = now() where code_hash = $1 and user_id = $2 and used_at is null', [hashToken(clean), userId]);
+  return (res.rowCount ?? 0) > 0;
+}
+
+export async function regenerateRecoveryCodes(ctx: Context): Promise<void> {
+  const auth = ctx.state.auth as AuthState;
+  const body = (ctx.request.body ?? {}) as Record<string, unknown>;
+  if (!auth.totpEnabled) return fail(ctx, 400, 'Two-factor authentication is off');
+  if (!(await confirmPassword(ctx, body.currentPassword))) return;
+  ctx.body = { recoveryCodes: await issueRecoveryCodes(auth.userId) };
 }
 
 export async function logout(ctx: Context): Promise<void> {
   const auth = ctx.state.auth as AuthState;
   await query('delete from webmail_sessions where token_hash = $1', [auth.tokenHash]);
+  // a signed-out device gets no more notifications
+  const endpoint = (ctx.request.body as { pushEndpoint?: unknown } | undefined)?.pushEndpoint;
+  if (typeof endpoint === 'string') await query('delete from push_subscriptions where user_id = $1 and endpoint = $2', [auth.userId, endpoint]);
   ctx.append('Set-Cookie', sessionCookie('', 0));
   ctx.status = 204;
 }
 
 export async function me(ctx: Context): Promise<void> {
-  const auth = ctx.state.auth as AuthState;
-  ctx.body = { username: auth.username, totpEnabled: auth.totpEnabled } satisfies SessionUser;
+  ctx.body = sessionUser(ctx.state.auth as AuthState);
 }
 
 export async function listSessions(ctx: Context): Promise<void> {
@@ -410,11 +483,14 @@ export async function listSessions(ctx: Context): Promise<void> {
 export async function revokeOtherSessions(ctx: Context): Promise<void> {
   const auth = ctx.state.auth as AuthState;
   await query('delete from webmail_sessions where user_id = $1 and token_hash <> $2', [auth.userId, auth.tokenHash]);
+  // Other devices also stop receiving notifications. This device names its own subscription to keep it.
+  const keep = (ctx.request.body as { keepPushEndpoint?: unknown } | undefined)?.keepPushEndpoint;
+  await query('delete from push_subscriptions where user_id = $1 and endpoint <> $2', [auth.userId, typeof keep === 'string' ? keep : '']);
   ctx.status = 204;
 }
 
 /** Re-authentication inside a live session (password change, two-factor). Throttled per address only. */
-async function confirmPassword(ctx: Context, password: unknown): Promise<boolean> {
+export async function confirmPassword(ctx: Context, password: unknown): Promise<boolean> {
   const auth = ctx.state.auth as AuthState;
   const ip = clientIp(ctx);
   const attempt = await beginAttempt(auth.username, ip, true);
@@ -438,7 +514,12 @@ export async function changePassword(ctx: Context): Promise<void> {
   }
   if (!(await confirmPassword(ctx, body.currentPassword))) return;
   await query('update webmail_users set passhash = $2 where id = $1', [auth.userId, await hashPassword(next)]);
+  // A password is changed when someone else may know it. Everything that person could have set up
+  // to keep getting in, or keep getting mail previews, goes with it.
   await query('delete from webmail_sessions where user_id = $1 and token_hash <> $2', [auth.userId, auth.tokenHash]);
+  await query('delete from webmail_devices where user_id = $1', [auth.userId]);
+  await query('delete from webauthn_credentials where user_id = $1', [auth.userId]);
+  await query('delete from push_subscriptions where user_id = $1', [auth.userId]);
   ctx.status = 204;
 }
 
@@ -460,7 +541,8 @@ export async function totpEnable(ctx: Context): Promise<void> {
   if (!pending || step === null) return fail(ctx, 400, 'That code is not valid', 'bad_totp');
   await query(`update webmail_users set totp_secret = $2, totp_last_step = $3, settings = settings - 'pendingTotp' where id = $1`, [auth.userId, pending, step]);
   await query('delete from webmail_sessions where user_id = $1 and token_hash <> $2', [auth.userId, auth.tokenHash]);
-  ctx.status = 204;
+  // shown once: the way back in if the authenticator is lost
+  ctx.body = { recoveryCodes: await issueRecoveryCodes(auth.userId) };
 }
 
 export async function totpDisable(ctx: Context): Promise<void> {
@@ -468,5 +550,6 @@ export async function totpDisable(ctx: Context): Promise<void> {
   const body = (ctx.request.body ?? {}) as Record<string, unknown>;
   if (!(await confirmPassword(ctx, body.currentPassword))) return;
   await query(`update webmail_users set totp_secret = null, totp_last_step = null, settings = settings - 'pendingTotp' where id = $1`, [auth.userId]);
+  await query('delete from webmail_recovery_codes where user_id = $1', [auth.userId]);
   ctx.status = 204;
 }

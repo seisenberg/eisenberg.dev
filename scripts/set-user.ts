@@ -1,7 +1,8 @@
 // Creates a webmail user or resets its password:
 //   npm run user:set -- <username>            (prompts for the password, input hidden)
 //   EISENMAIL_PASSWORD=... npm run user:set -- <username>
-// Resetting a password also signs the user out everywhere, forgets trusted browsers and switches two-factor off.
+// Creates an OWNER (members are added in the web UI). Resetting a password also signs the user out
+// everywhere, forgets trusted browsers, removes passkeys and recovery codes, and switches two-factor off.
 import readline from 'node:readline';
 import { hashPassword, MIN_PASSWORD_LENGTH } from '../src/server/auth.js';
 import { closePool, query } from '../src/server/db.js';
@@ -45,5 +46,9 @@ const res = await query<{ id: number }>(
 );
 await query('delete from webmail_sessions where user_id = $1', [res.rows[0].id]);
 await query('delete from webmail_devices where user_id = $1', [res.rows[0].id]);
+// a reset is also the way back in after losing every other credential, so those go too
+await query('delete from webmail_recovery_codes where user_id = $1', [res.rows[0].id]);
+await query('delete from webauthn_credentials where user_id = $1', [res.rows[0].id]);
+await query('delete from push_subscriptions where user_id = $1', [res.rows[0].id]);
 console.log(`user "${username}" saved; all of its sessions were signed out`);
 await closePool();

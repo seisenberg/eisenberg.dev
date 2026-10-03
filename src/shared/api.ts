@@ -49,6 +49,9 @@ export interface MessageSummary {
   isFlagged: boolean;
   isAnswered: boolean;
   hasAttachments: boolean;
+  /** conversation this message belongs to, and how many messages it has */
+  threadId: string;
+  threadCount: number;
 }
 
 export interface AttachmentInfo {
@@ -56,6 +59,8 @@ export interface AttachmentInfo {
   filename: string;
   contentType: string;
   size: number;
+  /** an image the browser can show safely in place */
+  previewable: boolean;
 }
 
 export interface MessageDetail extends MessageSummary {
@@ -69,6 +74,8 @@ export interface MessageDetail extends MessageSummary {
   auth: Record<string, string> | null;
   /** The address a reply should be sent from by default. */
   replyFrom: string;
+  /** The whole conversation, oldest first (includes this message). */
+  thread: MessageSummary[];
 }
 
 export interface MessageList {
@@ -106,6 +113,8 @@ export interface SendRequest {
   /** forward: re-attach these attachment indexes of inReplyToId. */
   forwardAttachments?: number[];
   attachments?: OutgoingAttachment[];
+  /** the autosaved draft this message was written in; deleted once sent */
+  draftId?: string;
 }
 
 export interface Identities {
@@ -139,6 +148,9 @@ export interface UploadTicket {
 export interface SessionUser {
   username: string;
   totpEnabled: boolean;
+  /** owner: everything. member: mail for `domains` only, no file drop, no user management. */
+  role: 'owner' | 'member';
+  domains: string[] | null;
 }
 
 export interface SessionInfo {
@@ -162,6 +174,15 @@ export type ForwardStyle = 'inline' | 'attach';
 
 export interface DeliveryRule {
   address: string;
+  /** mail to a blocked address is dropped on arrival */
+  blocked: boolean;
+  /** how many messages were dropped since it was blocked */
+  blockedCount: number;
+  /** free text: who this address was given to */
+  note: string;
+  /** messages received on this address that are still stored, and when the last one came */
+  total: number;
+  lastReceived: string | null;
   /** forward a copy to the private mailbox */
   forward: boolean;
   /** push notification to installed web apps */
@@ -197,4 +218,69 @@ export interface PushStatus {
 export interface PushSubscriptionInput {
   endpoint: string;
   keys: { p256dh: string; auth: string };
+}
+
+// ---- drafts, contacts, settings, filters ------------------------------------------------------
+
+export interface DraftPayload {
+  mode: 'new' | 'reply' | 'replyAll' | 'forward';
+  from: string;
+  fromName?: string;
+  to: string;
+  cc: string;
+  bcc?: string;
+  subject: string;
+  text: string;
+  inReplyToId?: string;
+  forwardAttachments?: number[];
+  forwardedNames?: string[];
+}
+
+export interface Draft {
+  id: string;
+  updatedAt: string;
+  payload: DraftPayload;
+}
+
+export interface Contact {
+  name: string;
+  address: string;
+}
+
+export type FilterAction = 'archive' | 'read' | 'flag' | 'junk' | 'trash';
+
+export interface MailFilter {
+  id: string;
+  enabled: boolean;
+  matchFrom: string;
+  matchSubject: string;
+  matchAddress: string;
+  action: FilterAction;
+}
+
+export interface MailSettings {
+  signature: string;
+  /** Trash and Junk are emptied of messages older than this */
+  purgeAfterDays: number;
+  /** owner only; empty for members */
+  filters: MailFilter[];
+}
+
+// ---- users, passkeys ----------------------------------------------------------------------------
+
+export interface UserInfo {
+  id: number;
+  username: string;
+  role: 'owner' | 'member';
+  domains: string[] | null;
+  totpEnabled: boolean;
+  passkeys: number;
+  createdAt: string;
+}
+
+export interface PasskeyInfo {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string | null;
 }

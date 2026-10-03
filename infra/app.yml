@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  eisenmail application (deploy after bootstrap.yml and after the first images are in the
-  registry): the two Lambda functions, the HTTPS endpoint and the SES receiving rule.
+  eisenmail application (deploy after bootstrap.yml and database.yml, and after the first images
+  are in the registry): the two Lambda functions, the HTTPS endpoint, the SES receiving rule,
+  the scheduled reconcile run and the alarms.
   Secrets are NOT parameters here; they are read from SSM Parameter Store at runtime.
 
 Metadata:
@@ -9,10 +10,12 @@ Metadata:
     ParameterGroups:
       - Label: { default: Mail }
         Parameters: [MailDomains, ForwardTo, OwnerAddresses, DefaultFrom]
-      - Label: { default: Database }
-        Parameters: [DbHost, DbPort, DbName, DbUser, DbPasswordParameter, DbSslMode]
-      - Label: { default: SSH tunnel to the database host (leave TunnelHost empty for a direct connection) }
-        Parameters: [TunnelHost, TunnelPort, TunnelUser, TunnelKeyParameter, TunnelHostKey]
+      - Label: { default: Alarms (optional) }
+        Parameters: [AlertEmail]
+      - Label: { default: Database (the defaults fit the host made by database.yml) }
+        Parameters: [UseDatabaseStack, TunnelHostKeyParameter, DbName, DbUser, DbPasswordParameter, TunnelKeyParameter, TunnelPort, TunnelUser]
+      - Label: { default: Your own database instead (only with UseDatabaseStack=false; leave TunnelHost empty for a direct connection) }
+        Parameters: [TunnelHost, TunnelHostKey, DbHost, DbPort, DbSslMode]
       - Label: { default: Web site }
         Parameters: [DomainName, CertificateArn, TrustedProxyHops]
       - Label: { default: Push notifications (optional) }
@@ -48,6 +51,30 @@ Parameters:
     Default: ""
     Description: Optional default From address for new messages in the webmail.
 
+  AlertEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[^@\\s,]+@[^@\\s,]+\\.[^@\\s,]+$"
+    Description: >-
+      Where alarms are sent (function errors, mail reputation, missing database backup). AWS mails
+      a confirmation link to this address; nothing arrives until you click it. Empty means no alarms.
+
+  UseDatabaseStack:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      true: use the database host made by infra/database.yml (its address and host key are looked
+      up, nothing to type). false: use your own PostgreSQL through TunnelHost or DbHost below.
+  TunnelHostKeyParameter:
+    Type: String
+    Default: /eisenmail/tunnel_host_key
+    AllowedPattern: "^/[A-Za-z0-9_./-]+(:[0-9]+)?$"
+    Description: >-
+      With UseDatabaseStack=true: name of the SSM parameter in which the database host published
+      its public host key. If the host is ever rebuilt, append the parameter's new version
+      (for example /eisenmail/tunnel_host_key:2) so that the functions get the new key.
+
   DbHost:
     Type: String
     Default: 127.0.0.1
@@ -74,7 +101,7 @@ Parameters:
   TunnelHost:
     Type: String
     Default: ""
-    Description: Public DNS name or IP of the database host. Empty means connect directly to DbHost.
+    Description: Only with UseDatabaseStack=false. Public DNS name or IP of your database host. Empty means connect directly to DbHost.
   TunnelPort:
     Type: Number
     Default: 22
@@ -88,7 +115,7 @@ Parameters:
   TunnelHostKey:
     Type: String
     Default: ""
-    Description: The host's public key, e.g. "ssh-ed25519 AAAA..." (printed by infra/db-host.sh). Required with TunnelHost.
+    Description: Only with UseDatabaseStack=false. The host's public key, e.g. "ssh-ed25519 AAAA..." (printed by infra/db-host.sh in manual mode). Required with TunnelHost.
 
   DomainName:
     Type: String
@@ -113,15 +140,27 @@ Parameters:
     Default: /eisenmail/vapid_private_key
 
 Conditions:
-  UseTunnel: !Not [!Equals [!Ref TunnelHost, ""]]
+  UseDbStack: !Equals [!Ref UseDatabaseStack, "true"]
+  UseTunnel: !Or [!Equals [!Ref UseDatabaseStack, "true"], !Not [!Equals [!Ref TunnelHost, ""]]]
+  HasAlerts: !Not [!Equals [!Ref AlertEmail, ""]]
+  HasBackupAlarm: !And [!Not [!Equals [!Ref AlertEmail, ""]], !Equals [!Ref UseDatabaseStack, "true"]]
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
   HasPush: !Not [!Equals [!Ref VapidPublicKey, ""]]
   HasOwnerAddresses: !Not [!Equals [!Ref OwnerAddresses, ""]]
   HasDefaultFrom: !Not [!Equals [!Ref DefaultFrom, ""]]
 
 Rules:
-  TunnelNeedsHostKey:
-    RuleCondition: !Not [!Equals [!Ref TunnelHost, ""]]
+  DatabaseStackSuppliesTheTunnel:
+    RuleCondition: !Equals [!Ref UseDatabaseStack, "true"]
+    Assertions:
+      - Assert: !And [!Equals [!Ref TunnelHost, ""], !Equals [!Ref TunnelHostKey, ""]]
+        AssertDescription: >-
+          With UseDatabaseStack=true the tunnel host and its key come from the database stack, so
+          TunnelHost and TunnelHostKey must be empty. To use your own host set UseDatabaseStack=false.
+      - Assert: !Equals [!Ref DbHost, "127.0.0.1"]
+        AssertDescription: With UseDatabaseStack=true DbHost must stay 127.0.0.1 (PostgreSQL as seen from the database host).
+  OwnTunnelNeedsHostKey:
+    RuleCondition: !And [!Equals [!Ref UseDatabaseStack, "false"], !Not [!Equals [!Ref TunnelHost, ""]]]
     Assertions:
       - Assert: !Not [!Equals [!Ref TunnelHostKey, ""]]
         AssertDescription: TunnelHostKey is required when TunnelHost is set.
@@ -132,6 +171,22 @@ Rules:
         AssertDescription: CertificateArn is required when DomainName is set.
 
 Resources:
+  # Where the tunnel settings of both functions come from.
+  #
+  # With UseDatabaseStack=true the host address is the Elastic IP exported by database.yml, and
+  # the host key is read from the SSM parameter the host wrote at its first boot, through a
+  # dynamic reference ({{resolve:ssm:...}}) inside the !If.
+  #
+  # Why not a parameter of type AWS::SSM::Parameter::Value<String>? CloudFormation looks such a
+  # parameter up on every deploy, whether it is used or not, so somebody running their own
+  # database (UseDatabaseStack=false) would have to create a meaningless SSM parameter just to
+  # deploy. The dynamic reference is only looked up when its branch of the !If is taken.
+  # The price: CloudFormation reads it when the function is created or changed, not on every
+  # deploy. After rebuilding the database host, pass TunnelHostKeyParameter with the new
+  # version number appended (see its description) to make the functions take the new key.
+  #
+  # With UseDatabaseStack=false the plain parameters TunnelHost and TunnelHostKey apply.
+
   # ---- web: Koa behind the Lambda Web Adapter ---------------------------------------------------
   WebFunction:
     Type: AWS::Lambda::Function
@@ -160,11 +215,17 @@ Resources:
           POSTGRES_DB_USER: !Ref DbUser
           POSTGRES_DB_PASSWORD_SSM: !Ref DbPasswordParameter
           POSTGRES_DB_SSLMODE: !If [UseTunnel, !Ref "AWS::NoValue", !Ref DbSslMode]
-          SSH_TUNNEL_HOST: !If [UseTunnel, !Ref TunnelHost, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_HOST: !If
+            - UseDbStack
+            - !ImportValue { "Fn::Sub": "${ProjectName}-db-host" }
+            - !If [UseTunnel, !Ref TunnelHost, !Ref "AWS::NoValue"]
           SSH_TUNNEL_PORT: !If [UseTunnel, !Ref TunnelPort, !Ref "AWS::NoValue"]
           SSH_TUNNEL_USER: !If [UseTunnel, !Ref TunnelUser, !Ref "AWS::NoValue"]
           SSH_TUNNEL_KEY_SSM: !If [UseTunnel, !Ref TunnelKeyParameter, !Ref "AWS::NoValue"]
-          SSH_TUNNEL_HOST_KEY: !If [UseTunnel, !Ref TunnelHostKey, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_HOST_KEY: !If
+            - UseDbStack
+            - !Sub "{{resolve:ssm:${TunnelHostKeyParameter}}}"
+            - !If [UseTunnel, !Ref TunnelHostKey, !Ref "AWS::NoValue"]
           MAIL_BUCKET: !ImportValue { "Fn::Sub": "${ProjectName}-mail-bucket" }
           MAIL_PREFIX: email-inbox/
           FILES_BUCKET: !ImportValue { "Fn::Sub": "${ProjectName}-files-bucket" }
@@ -255,17 +316,25 @@ Resources:
           MAIL_DOMAINS: !Join [",", !Ref MailDomains]
           MAIL_BUCKET: !ImportValue { "Fn::Sub": "${ProjectName}-mail-bucket" }
           MAIL_PREFIX: email-inbox/
+          # the scheduled reconcile run (below) looks this far back for mail it never processed
+          RECONCILE_MAX_AGE_HOURS: "72"
           POSTGRES_DB_HOST: !Ref DbHost
           POSTGRES_DB_PORT: !Ref DbPort
           POSTGRES_DB_NAME: !Ref DbName
           POSTGRES_DB_USER: !Ref DbUser
           POSTGRES_DB_PASSWORD_SSM: !Ref DbPasswordParameter
           POSTGRES_DB_SSLMODE: !If [UseTunnel, !Ref "AWS::NoValue", !Ref DbSslMode]
-          SSH_TUNNEL_HOST: !If [UseTunnel, !Ref TunnelHost, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_HOST: !If
+            - UseDbStack
+            - !ImportValue { "Fn::Sub": "${ProjectName}-db-host" }
+            - !If [UseTunnel, !Ref TunnelHost, !Ref "AWS::NoValue"]
           SSH_TUNNEL_PORT: !If [UseTunnel, !Ref TunnelPort, !Ref "AWS::NoValue"]
           SSH_TUNNEL_USER: !If [UseTunnel, !Ref TunnelUser, !Ref "AWS::NoValue"]
           SSH_TUNNEL_KEY_SSM: !If [UseTunnel, !Ref TunnelKeyParameter, !Ref "AWS::NoValue"]
-          SSH_TUNNEL_HOST_KEY: !If [UseTunnel, !Ref TunnelHostKey, !Ref "AWS::NoValue"]
+          SSH_TUNNEL_HOST_KEY: !If
+            - UseDbStack
+            - !Sub "{{resolve:ssm:${TunnelHostKeyParameter}}}"
+            - !If [UseTunnel, !Ref TunnelHostKey, !Ref "AWS::NoValue"]
           VAPID_PRIVATE_KEY_SSM: !If [HasPush, !Ref VapidPrivateKeyParameter, !Ref "AWS::NoValue"]
 
   InboxLogs:
@@ -283,6 +352,38 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: ses.amazonaws.com
       SourceAccount: !Ref AWS::AccountId
+
+  # SES and the schedule both call the function asynchronously. If a call fails (the database
+  # host is rebooting, say) Lambda tries twice more, and gives up after an hour. Whatever is
+  # still missing then is picked up by the reconcile run.
+  InboxAsyncCalls:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref InboxFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 2
+      MaximumEventAgeInSeconds: 3600
+
+  # ---- reconcile: every 15 minutes, look for mail that arrived in S3 but was never processed ----
+  ReconcileSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-reconcile"
+      Description: Asks the inbox function to process any stored mail it has not seen.
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Id: inbox
+          Arn: !GetAtt InboxFunction.Arn
+          Input: '{"eisenmail": "reconcile"}'
+
+  ReconcileInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InboxFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReconcileSchedule.Arn
 
   ReceiptRuleSet:
     Type: AWS::SES::ReceiptRuleSet
@@ -309,6 +410,147 @@ Resources:
           - LambdaAction:
               FunctionArn: !GetAtt InboxFunction.Arn
               InvocationType: Event
+
+  # ---- alarms: one email address, told when something needs a look ------------------------------
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlerts
+    Properties:
+      TopicName: !Sub "${ProjectName}-alerts"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  # Mail is not being processed. Because the reconcile run calls the function every 15 minutes,
+  # this also fires within the half hour when the database cannot be reached.
+  InboxErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerts
+    Properties:
+      AlarmName: !Sub "${ProjectName}-inbox-errors"
+      AlarmDescription: The inbox function failed. Incoming mail may be waiting. See the log group /aws/lambda/<project>-inbox.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref InboxFunction }
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  InboxThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerts
+    Properties:
+      AlarmName: !Sub "${ProjectName}-inbox-throttles"
+      AlarmDescription: Lambda refused to run the inbox function (account concurrency limit). Mail is delayed.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref InboxFunction }
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  WebErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerts
+    Properties:
+      AlarmName: !Sub "${ProjectName}-web-errors"
+      AlarmDescription: The web function crashed or timed out five times in 15 minutes. See the log group /aws/lambda/<project>-web.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref WebFunction }
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerts
+    Properties:
+      AlarmName: !Sub "${ProjectName}-site-5xx"
+      AlarmDescription: The site answered with a server error five times in 15 minutes.
+      Namespace: AWS/ApiGateway
+      MetricName: 5xx
+      Dimensions:
+        - { Name: ApiId, Value: !Ref HttpApi }
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  # SES reviews an account at a 5% bounce rate or a 0.1% complaint rate, and can pause sending
+  # beyond that. These two fire just before, while there is still time to find the cause.
+  # The metrics are for the whole account in this region and only appear while mail is sent,
+  # so a gap in the data leaves the alarm as it was.
+  SesBounceRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerts
+    Properties:
+      AlarmName: !Sub "${ProjectName}-ses-bounce-rate"
+      AlarmDescription: SES bounce rate is 4% or more. At 5% AWS puts the account under review.
+      Namespace: AWS/SES
+      MetricName: Reputation.BounceRate
+      Statistic: Average
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 0.04
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: ignore
+      AlarmActions: [!Ref AlertTopic]
+
+  SesComplaintRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerts
+    Properties:
+      AlarmName: !Sub "${ProjectName}-ses-complaint-rate"
+      AlarmDescription: SES complaint rate is 0.08% or more. At 0.1% AWS puts the account under review.
+      Namespace: AWS/SES
+      MetricName: Reputation.ComplaintRate
+      Statistic: Average
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 0.0008
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: ignore
+      AlarmActions: [!Ref AlertTopic]
+
+  # The backup script on the database host (infra/db-host.sh) reports the size of each dump it
+  # has verified and uploaded, as the metric <project>/Database BackupBytes. That is the only
+  # custom metric in the system. Six empty six-hour periods in a row mean a night was missed.
+  # Only with the database stack: your own host does not report it.
+  BackupMissingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasBackupAlarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-no-database-backup"
+      AlarmDescription: No database dump reached the backup bucket in the last 36 hours. See docs/BACKUP-AND-MIGRATION.md.
+      Namespace: !Sub "${ProjectName}/Database"
+      MetricName: BackupBytes
+      Statistic: SampleCount
+      Period: 21600
+      EvaluationPeriods: 6
+      DatapointsToAlarm: 6
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
 
 Outputs:
   SiteUrl:

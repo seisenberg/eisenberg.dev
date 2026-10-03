@@ -2,6 +2,7 @@ import path from 'node:path';
 import config from './config.js';
 import { createApp } from './app.js';
 import { getPool } from './db.js';
+import { ensureSchema, setSchemaState } from './schema.js';
 import { serveStatic } from './static.js';
 
 // Production entry point. In AWS this runs behind the Lambda Web Adapter, which proxies the
@@ -19,7 +20,17 @@ const app = createApp({ frontend: serveStatic(path.resolve('dist')) });
 process.on('unhandledRejection', (error) => console.error('unhandledRejection:', error));
 process.on('uncaughtException', (error) => console.error('uncaughtException:', error));
 
-// Warm the database connection (and ssh tunnel) during init rather than on the first request.
-getPool().catch((err) => console.error(`database not reachable at start-up: ${err.message}`));
+// Connect (through the ssh tunnel when there is one) and bring the schema up to date before taking
+// requests. If the database is unreachable the server still starts, so the public page keeps
+// working and /api/health reports the problem.
+try {
+  await getPool();
+  const state = await ensureSchema();
+  setSchemaState(state);
+  if (state === 'applied') console.log('database schema updated');
+} catch (err) {
+  setSchemaState('failed');
+  console.error(`database not ready at start-up: ${(err as Error).message}`);
+}
 
 app.listen(config.port, () => console.log(`eisenmail listening on ${config.port}`));

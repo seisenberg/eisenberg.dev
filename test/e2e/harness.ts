@@ -48,7 +48,8 @@ export async function startE2E(): Promise<E2E> {
 
   const server: Server = createApp({ frontend: serveStatic(path.resolve('dist')) }).listen(0, '127.0.0.1');
   await new Promise<void>((resolve, reject) => server.once('listening', resolve).once('error', reject));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  // "localhost", not the IP: passkeys need a domain name as their relying party id
+  const base = `http://localhost:${(server.address() as AddressInfo).port}`;
   let browser: Browser;
   try {
     browser = await launch(chrome);
@@ -66,7 +67,7 @@ function launch(chrome: string): Promise<Browser> {
     executablePath: chrome,
     headless: true,
     // GitHub's runners (and most containers) cannot use Chrome's own sandbox
-    args: process.env.CI ? ['--no-sandbox', '--disable-setuid-sandbox'] : [],
+    args: ['--host-resolver-rules=MAP localhost 127.0.0.1', ...(process.env.CI ? ['--no-sandbox', '--disable-setuid-sandbox'] : [])],
   });
 }
 

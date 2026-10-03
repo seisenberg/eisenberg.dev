@@ -95,7 +95,7 @@ jobs:
           cache-to: type=gha,scope=inbox,mode=max
 
   infra:
-    name: CloudFormation templates lint
+    name: Infrastructure templates and scripts lint
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -106,3 +106,5 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install cfn-lint==1.* && cfn-lint infra/*.yml
+      - name: Shell scripts
+        run: bash -n infra/db-host.sh && shellcheck infra/db-host.sh

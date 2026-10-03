@@ -473,13 +473,52 @@ class Database:
         }
 
     # -- web push ------------------------------------------------------------------------------
-    def list_push_subscriptions(self, limit: int = 20) -> List[Mapping[str, Any]]:
-        """Up to `limit` subscriptions, healthiest first."""
-        return self._run(
-            "select endpoint, p256dh, auth from push_subscriptions "
-            "order by failure_count, last_success_at desc nulls last, created_at desc limit %s",
-            [int(limit)],
+    def delete_orphan_push_subscriptions(self) -> int:
+        """Remove subscriptions whose user no longer exists. Returns how many were removed."""
+        rows = self._run(
+            "delete from push_subscriptions s "
+            "where not exists (select 1 from webmail_users u where u.id = s.user_id) returning s.endpoint"
         )
+        return len(rows)
+
+    def list_push_subscriptions(self, limit: int = 40, per_user: int = 5) -> List[Mapping[str, Any]]:
+        """Subscriptions to notify, with their user's visibility (role, domains).
+
+        At most `per_user` per user (that user's healthiest), so one user with many subscriptions
+        cannot crowd another user's devices out; owners are listed before members; `limit` is the
+        overall ceiling. Subscriptions without a user are not listed."""
+        return self._run(
+            "select endpoint, p256dh, auth, role, domains from ("
+            "  select s.endpoint, s.p256dh, s.auth, u.role, u.domains, s.failure_count, s.last_success_at, s.created_at,"
+            "         row_number() over (partition by s.user_id order by s.failure_count,"
+            "                            s.last_success_at desc nulls last, s.created_at desc) as rank_for_user"
+            "    from push_subscriptions s join webmail_users u on u.id = s.user_id"
+            ") ranked where rank_for_user <= %s "
+            "order by (role <> 'owner'), failure_count, last_success_at desc nulls last, created_at desc limit %s",
+            [int(per_user), int(limit)],
+        )
+
+    def count_unread(self, domains: Optional[Sequence[str]] = None) -> int:
+        """Unread inbox messages: indexed ones (messages) plus inbound mail the web side has not
+        indexed yet (lambda_inbox.processed_at is null). `domains` restricts both to mail for
+        those receiving domains (a member's view); None counts everything (an owner's view)."""
+        if domains is None:
+            rows = self._run(
+                "select (select count(*) from messages where mailbox = 'inbox' and not is_read) "
+                "+ (select count(*) from lambda_inbox where kind = 'inbound' and processed_at is null) as unread"
+            )
+        else:
+            wanted = [str(d).lower() for d in domains]
+            rows = self._run(
+                "select (select count(*) from messages where mailbox = 'inbox' and not is_read and domains && %s) "
+                "+ (select count(*) from lambda_inbox i where i.kind = 'inbound' and i.processed_at is null "
+                "and exists (select 1 from jsonb_array_elements_text("
+                "case when jsonb_typeof(i.event->'receipt'->'recipients') = 'array' "
+                "then i.event->'receipt'->'recipients' else '[]'::jsonb end) as r(address) "
+                "where lower(split_part(r.address, '@', 2)) = any(%s))) as unread",
+                [wanted, wanted],
+            )
+        return int(rows[0]["unread"]) if rows else 0
 
     def push_succeeded(self, endpoint: str) -> None:
         self._run(
@@ -497,6 +536,49 @@ class Database:
 
     def delete_push_subscription(self, endpoint: str) -> None:
         self._run("delete from push_subscriptions where endpoint = %s", [endpoint], fetch=False)
+
+    # -- blocked addresses, delivery log, reconcile ------------------------------------------------
+    def record_blocked(self, addresses: Sequence[str]) -> List[str]:
+        """Which of `addresses` are blocked. Each hit is counted (blocked_count, last_blocked_at)."""
+        if not addresses:
+            return []
+        rows = self._run(
+            "update address_rules set blocked_count = blocked_count + 1, last_blocked_at = now() "
+            "where blocked and address = any(%s) returning address",
+            [list(addresses)],
+        )
+        return [row["address"] for row in rows]
+
+    def log_outcome(self, message_id: str, outcome: str) -> None:
+        """One row per SES message the handler has finished with (the reconcile job reads it)."""
+        self._run(
+            "insert into inbox_log (message_id, outcome) values (%s, %s) "
+            "on conflict (message_id) do update set outcome = excluded.outcome, at = now()",
+            [message_id, outcome],
+            fetch=False,
+        )
+
+    def handled_message_ids(self, message_ids: Sequence[str]) -> set:
+        """The subset of `message_ids` that needs no replay: logged in inbox_log, stored in
+        lambda_inbox, or recorded as the source of a relayed reply.
+
+        One kind of stored row still counts as unhandled: an inbound row whose forward step never
+        finished (meta has "notified" but no "forwarded": the store succeeded, the forward raised
+        on every retry). Replaying it completes the forward; the row itself is not written again."""
+        handled: set = set()
+        ids = list(message_ids)
+        for start in range(0, len(ids), 500):
+            batch = ids[start:start + 500]
+            rows = self._run(
+                "select message_id as id from inbox_log where message_id = any(%s) "
+                "union select message_id from lambda_inbox where message_id = any(%s) "
+                "and not (kind = 'inbound' and coalesce(meta ? 'notified' and not meta ? 'forwarded', false)) "
+                "union select meta->>'relay_source_id' from lambda_inbox "
+                "where kind = 'relay_out' and meta->>'relay_source_id' = any(%s)",
+                [batch, batch, batch],
+            )
+            handled.update(row["id"] for row in rows)
+        return handled
 
     def touch_token(self, token: str) -> None:
         self._run(

@@ -176,15 +176,27 @@ def test_rotated_password_is_refetched_from_ssm(ids):
 
 
 def test_push_subscription_bookkeeping(database, ids):
-    endpoints = [f"https://fcm.googleapis.com/fcm/send/{ids}-{n}" for n in range(3)]
+    endpoints = [f"https://fcm.googleapis.com/fcm/send/{ids}-{n}" for n in range(4)]
     with psycopg.connect(DSN, autocommit=True) as conn:
         try:
-            for n, endpoint in enumerate(endpoints):
+            owner = conn.execute("insert into webmail_users (email, role) values (%s, 'owner') returning id",
+                                 [f"{ids}-owner"]).fetchone()[0]
+            member = conn.execute("insert into webmail_users (email, role, domains) values (%s, 'member', %s) "
+                                  "returning id", [f"{ids}-member", ["shop.example"]]).fetchone()[0]
+            for n, (endpoint, user) in enumerate(zip(endpoints, (owner, owner, member, 2_000_000_000 - 7))):
                 conn.execute("insert into push_subscriptions (endpoint, p256dh, auth, user_id, failure_count) "
-                             "values (%s, %s, %s, 1, %s)", [endpoint, f"p{n}", f"a{n}", 3 - n])
-            listed = [r for r in database.list_push_subscriptions(20) if r["endpoint"] in endpoints]
-            assert [r["endpoint"] for r in listed] == endpoints[::-1]                # healthiest first
-            assert listed[0] == {"endpoint": endpoints[2], "p256dh": "p2", "auth": "a2"}
+                             "values (%s, %s, %s, %s, %s)", [endpoint, f"p{n}", f"a{n}", user, 3 - n])
+
+            assert database.delete_orphan_push_subscriptions() >= 1                  # the user-less one goes
+            assert conn.execute("select count(*) from push_subscriptions where endpoint = %s",
+                                [endpoints[3]]).fetchone() == (0,)
+            listed = [r for r in database.list_push_subscriptions(1000) if r["endpoint"] in endpoints]
+            # owners first, healthiest first within a role
+            assert [r["endpoint"] for r in listed] == [endpoints[1], endpoints[0], endpoints[2]]
+            assert listed[2] == {"endpoint": endpoints[2], "p256dh": "p2", "auth": "a2", "role": "member",
+                                 "domains": ["shop.example"]}
+            assert listed[0]["role"] == "owner" and listed[0]["domains"] is None
+            assert len(database.list_push_subscriptions(1000, 1)) <= len(database.list_push_subscriptions(1000))
             assert len(database.list_push_subscriptions(1)) == 1
 
             database.push_failed(endpoints[0])
@@ -196,6 +208,84 @@ def test_push_subscription_bookkeeping(database, ids):
             assert rows == [(endpoints[0], 4, False), (endpoints[1], 0, True)]
         finally:
             conn.execute("delete from push_subscriptions where endpoint like %s", [f"%{ids}%"])
+            conn.execute("delete from webmail_users where email like %s", [ids + "%"])
+
+
+def test_blocked_addresses_are_counted(database, ids):
+    blocked, open_, unknown = (f"{ids}-{n}@eisenberg.dev" for n in ("blocked", "open", "unknown"))
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        try:
+            assert database.resolve_address_rule(blocked)["forward"] in (True, False)     # materialised: not blocked
+            database.resolve_address_rule(open_)
+            assert database.record_blocked([blocked, open_, unknown]) == []
+            conn.execute("update address_rules set blocked = true, note = 'leaked' where address = %s", [blocked])
+            assert database.record_blocked([blocked, open_, unknown]) == [blocked]
+            assert database.record_blocked([blocked]) == [blocked]
+            assert database.record_blocked([]) == []
+            rows = conn.execute("select address, blocked_count, last_blocked_at is not null from address_rules "
+                                "where address like %s order by address", [ids + "%"]).fetchall()
+            assert rows == [(blocked, 2, True), (open_, 0, False)]
+        finally:
+            conn.execute("delete from address_rules where address like %s", [ids + "%"])
+
+
+def test_delivery_log_and_handled_ids(database, ids):
+    logged, stored, incomplete, source, lost = (f"{ids}{n}" for n in ("log", "row", "inc", "src", "lost"))
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        try:
+            database.log_outcome(logged, "blocked")
+            database.log_outcome(logged, "dropped_virus")                           # upsert
+            assert conn.execute("select outcome from inbox_log where message_id = %s", [logged]).fetchone() == ("dropped_virus",)
+
+            database.insert_inbox(stored, "k", {}, b"x", "inbound")                 # meta null: an old row
+            database.insert_inbox(incomplete, "k", {}, b"x", "inbound")
+            database.merge_inbox_meta(incomplete, {"notified": True})               # stored, forward never finished
+            database.insert_inbox(f"{ids}relay", None, {}, b"x", "relay_out", {"relay_source_id": source})
+
+            ids_asked = [logged, stored, incomplete, source, lost]
+            assert database.handled_message_ids(ids_asked) == {logged, stored, source}
+            database.merge_inbox_meta(incomplete, {"forwarded": True})
+            assert database.handled_message_ids(ids_asked) == {logged, stored, incomplete, source}
+            assert database.handled_message_ids([]) == set()
+        finally:
+            conn.execute("delete from inbox_log where message_id like %s", [ids + "%"])
+
+
+def test_unread_count_per_visibility(database, ids):
+    mine, theirs = f"{ids[3:11]}-mine.example", f"{ids[3:11]}-theirs.example"
+
+    def event(*recipients):
+        return {"mail": {"messageId": "x"}, "receipt": {"recipients": list(recipients)}}
+
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        try:
+            base_all, base_mine = database.count_unread(), database.count_unread([mine])
+            assert base_mine == 0
+
+            # not indexed yet: counted from lambda_inbox by recipient domain (case-insensitive)
+            database.insert_inbox(f"{ids}-p1", "k", event(f"A@{mine.upper()}"), b"x", "inbound")
+            database.insert_inbox(f"{ids}-p2", "k", event(f"b@{theirs}", f"c@{mine}"), b"x", "inbound")
+            database.insert_inbox(f"{ids}-p3", "k", event(f"d@{theirs}"), b"x", "inbound")
+            database.insert_inbox(f"{ids}-p4", "k", event(f"e@{mine}"), b"x", "junk")                 # junk never counts
+            database.insert_inbox(f"{ids}-p5", "k", {"receipt": {"recipients": "not-a-list"}}, b"x", "inbound")
+            database.insert_inbox(f"{ids}-p6", "k", {}, b"x", "inbound")
+            assert database.count_unread() == base_all + 5
+            assert database.count_unread([mine]) == 2
+            assert database.count_unread([theirs.upper()]) == 2
+            assert database.count_unread([mine, theirs]) == 3
+            assert database.count_unread([]) == 0
+
+            # indexed by the web side: counted from messages while unread and in the inbox
+            conn.execute("update lambda_inbox set processed_at = now() where message_id like %s", [ids + "%"])
+            assert database.count_unread([mine]) == 0
+            for n, (mailbox, is_read) in enumerate((("inbox", False), ("inbox", True), ("archive", False), ("junk", False))):
+                conn.execute("insert into messages (raw_id, direction, mailbox, domains, is_read) values (%s, 'in', %s, %s, %s)",
+                             [f"{ids}-p{n + 1}", mailbox, [mine], is_read])
+            assert database.count_unread([mine]) == 1
+            assert database.count_unread([theirs]) == 0
+            assert database.count_unread() == base_all + 1
+        finally:
+            conn.execute("delete from messages where raw_id like %s", [ids + "%"])
 
 
 def test_reconnects_after_the_server_kills_the_connection(database, ids):

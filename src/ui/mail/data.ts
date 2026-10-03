@@ -3,22 +3,25 @@ import { useLocation, useNavigate, useSearchParams } from "react-router";
 import { type InfiniteData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { get, patch, post } from "@/lib/api";
-import type { Identities, MailboxTree, MailboxView, MessageDetail, MessageList, MessagePatch, MessageSummary } from "../../shared/api";
+import type { Draft, Identities, MailboxTree, MailboxView, MailSettings, MessageDetail, MessageList, MessagePatch, MessageSummary } from "../../shared/api";
 
 /** What the message list is showing. Lives in the URL so reload and back/forward work. */
+/** "drafts" is a client-side view: drafts are not messages. */
+export type Box = MailboxView | "drafts";
+
 export interface Scope {
-  box: MailboxView;
+  box: Box;
   domain?: string;
   address?: string;
 }
 
-const BOXES: MailboxView[] = ["inbox", "flagged", "sent", "archive", "junk", "trash"];
+const BOXES: Box[] = ["inbox", "flagged", "sent", "drafts", "archive", "junk", "trash"];
 
 export function useMailLocation() {
   const [params, setParams] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
-  const box = (BOXES.includes(params.get("box") as MailboxView) ? params.get("box") : "inbox") as MailboxView;
+  const box = (BOXES.includes(params.get("box") as Box) ? params.get("box") : "inbox") as Box;
   const domain = params.get("domain") ?? undefined;
   const address = params.get("address") ?? undefined;
   const id = params.get("id");
@@ -96,7 +99,7 @@ export function useMailLocation() {
 export function scopeTitle(scope: Scope): string {
   if (scope.address) return scope.address;
   if (scope.domain) return scope.domain;
-  return { inbox: "All Inboxes", flagged: "Flagged", sent: "Sent", archive: "Archive", junk: "Junk", trash: "Trash" }[scope.box];
+  return { inbox: "All Inboxes", flagged: "Flagged", sent: "Sent", drafts: "Drafts", archive: "Archive", junk: "Junk", trash: "Trash" }[scope.box];
 }
 
 export function useMailboxes() {
@@ -123,6 +126,28 @@ export function useMessages(scope: Scope, q: string) {
     getNextPageParam: (last) => last.nextCursor ?? undefined,
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
+    enabled: scope.box !== "drafts",
+  });
+}
+
+export function useDrafts() {
+  return useQuery({ queryKey: ["drafts"], queryFn: () => get<Draft[]>("/mail/drafts"), staleTime: 5_000 });
+}
+
+export function useMailSettings() {
+  return useQuery({ queryKey: ["mail-settings"], queryFn: () => get<MailSettings>("/mail/settings"), staleTime: 60_000 });
+}
+
+export function useMarkAllRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (scope: Scope) => post<{ changed: number }>("/mail/mark-read", { mailbox: scope.box, domain: scope.domain, address: scope.address }),
+    onSuccess: (d) => toast.success(d.changed ? `${d.changed} message${d.changed === 1 ? "" : "s"} marked as read` : "Nothing was unread"),
+    onError: (err) => toast.error((err as Error).message),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["mailboxes"] });
+      qc.invalidateQueries({ queryKey: ["messages"] });
+    },
   });
 }
 

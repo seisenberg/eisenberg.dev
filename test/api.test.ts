@@ -319,7 +319,15 @@ test('two-factor: setup, enable, required at login, replay refused', async () =>
   assert.match(setup.uri, /^otpauth:\/\/totp\//);
   assert.equal((await call('POST', '/api/auth/totp/enable', { code: '000000' })).status, 400);
   const code = () => totpCode(base32Decode(setup.secret), Math.floor(Date.now() / 30_000));
-  assert.equal((await call('POST', '/api/auth/totp/enable', { code: code() })).status, 204);
+  const enabled = await call('POST', '/api/auth/totp/enable', { code: code() });
+  assert.equal(enabled.status, 200);
+  const recovery: string[] = enabled.json.recoveryCodes;
+  assert.equal(recovery.length, 10);
+  assert.match(recovery[0], /^[a-z0-9]{4}(-[a-z0-9]{4}){3}$/);
+  // only hashes are stored
+  const stored = await local.pool.query('select code_hash from webmail_recovery_codes');
+  assert.equal(stored.rowCount, 10);
+  assert.ok(stored.rows.every((r) => !r.code_hash.toString('utf8').includes(recovery[0].replace(/-/g, ''))));
 
   const noCode = await call('POST', '/api/auth/login', DEV_USER, { noCookie: true });
   assert.equal(noCode.json.code, 'totp_required');
@@ -330,7 +338,17 @@ test('two-factor: setup, enable, required at login, replay refused', async () =>
   const ok = await call('POST', '/api/auth/login', { ...DEV_USER, code: next }, { noCookie: true });
   assert.equal(ok.status, 200, ok.text);
 
+  // a recovery code replaces the authenticator code, once
+  const viaRecovery = await call('POST', '/api/auth/login', { ...DEV_USER, code: recovery[3].toUpperCase() }, { noCookie: true });
+  assert.equal(viaRecovery.status, 200, viaRecovery.text);
+  assert.equal((await call('POST', '/api/auth/login', { ...DEV_USER, code: recovery[3] }, { noCookie: true })).json.code, 'bad_totp');
+  assert.equal((await call('POST', '/api/auth/login', { ...DEV_USER, code: 'aaaa-bbbb-cccc-dddd' }, { noCookie: true })).json.code, 'bad_totp');
+  const fresh = await call('POST', '/api/auth/recovery-codes', { currentPassword: DEV_USER.password });
+  assert.equal(fresh.json.recoveryCodes.length, 10);
+  assert.ok(!fresh.json.recoveryCodes.includes(recovery[0]));
+
   assert.equal((await call('POST', '/api/auth/totp/disable', { currentPassword: DEV_USER.password })).status, 204);
+  assert.equal((await local.pool.query('select 1 from webmail_recovery_codes')).rowCount, 0);
 });
 
 test('logout revokes the session server side', async () => {
@@ -350,10 +368,14 @@ test('a distributed lockout attempt does not lock out a browser that has signed 
   assert.match(good.headers.getSetCookie().find((c) => c.includes('device'))!, /HttpOnly; SameSite=Strict/);
 
   // an attacker spreads wrong guesses over many addresses
+  // (earlier tests already left a few failures for this username, so the cap is reached a little early)
+  let evaluated = 0;
   for (let i = 0; i < 30; i++) {
     const r = await call('POST', '/api/auth/login', { username: DEV_USER.username, password: `wrong-guess-${i}-xx` }, { noCookie: true, headers: from(`203.0.113.${i + 1}`) });
-    assert.equal(r.status, 401);
+    assert.ok(r.status === 401 || r.status === 429);
+    if (r.status === 401) evaluated++;
   }
+  assert.ok(evaluated >= 20 && evaluated <= 30, `${evaluated} guesses were evaluated`);
   // a stranger (no device cookie) is now locked out even with the right password ...
   const stranger = await call('POST', '/api/auth/login', DEV_USER, { noCookie: true, headers: from('198.51.100.77') });
   assert.equal(stranger.status, 429);
@@ -458,19 +480,22 @@ test('delivery rules: defaults for new addresses, per-address overrides', async 
   let rules = (await call('GET', '/api/mail/rules')).json;
   assert.deepEqual(rules.defaults, { forward: true, notify: true, forwardStyle: 'inline' });
   const github = () => rules.rules.find((r: Json) => r.address === 'github@eisenberg.dev');
-  assert.deepEqual(github(), { address: 'github@eisenberg.dev', forward: true, notify: true, forwardStyle: 'inline', explicit: false });
+  const core = (r: Json) => ({ address: r.address, forward: r.forward, notify: r.notify, forwardStyle: r.forwardStyle, explicit: r.explicit });
+  assert.deepEqual(core(github()), { address: 'github@eisenberg.dev', forward: true, notify: true, forwardStyle: 'inline', explicit: false });
+  assert.equal(github().total, 2);
+  assert.ok(github().lastReceived);
   assert.ok(!rules.rules.some((r: Json) => r.address.startsWith('reply-')), 'relay addresses are not listed');
 
   assert.equal((await call('POST', '/api/mail/rules', { address: 'GitHub@Eisenberg.dev', forward: false })).status, 204);
   rules = (await call('GET', '/api/mail/rules')).json;
-  assert.deepEqual(github(), { address: 'github@eisenberg.dev', forward: false, notify: true, forwardStyle: 'inline', explicit: true });
+  assert.deepEqual(core(github()), { address: 'github@eisenberg.dev', forward: false, notify: true, forwardStyle: 'inline', explicit: true });
 
   // flipping the defaults changes addresses without a rule, not the ones that have one
   assert.equal((await call('POST', '/api/mail/rules/defaults', { forward: false, notify: false, forwardStyle: 'attach' })).status, 204);
   assert.equal((await call('POST', '/api/mail/rules', { address: 'github@eisenberg.dev', forward: true })).status, 204);
   rules = (await call('GET', '/api/mail/rules')).json;
   assert.deepEqual(rules.defaults, { forward: false, notify: false, forwardStyle: 'attach' });
-  assert.deepEqual(github(), { address: 'github@eisenberg.dev', forward: true, notify: true, forwardStyle: 'inline', explicit: true });
+  assert.deepEqual(core(github()), { address: 'github@eisenberg.dev', forward: true, notify: true, forwardStyle: 'inline', explicit: true });
   const untouched = rules.rules.find((r: Json) => r.address === 'bank@eisenberg.dev');
   assert.deepEqual([untouched.forward, untouched.notify, untouched.forwardStyle, untouched.explicit], [false, false, 'attach', false]);
 
@@ -487,7 +512,14 @@ test('delivery rules: defaults for new addresses, per-address overrides', async 
   // a rule for an address that has not received anything yet
   assert.equal((await call('POST', '/api/mail/rules', { address: 'future@quartzworks.example', notify: true })).status, 204);
   rules = (await call('GET', '/api/mail/rules')).json;
-  assert.deepEqual(rules.rules.find((r: Json) => r.address === 'future@quartzworks.example'), { address: 'future@quartzworks.example', forward: false, notify: true, forwardStyle: 'attach', explicit: true });
+  assert.deepEqual(core(rules.rules.find((r: Json) => r.address === 'future@quartzworks.example')), { address: 'future@quartzworks.example', forward: false, notify: true, forwardStyle: 'attach', explicit: true });
+
+  // block a leaked address and remember who it was given to
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'future@quartzworks.example', blocked: true, note: 'Given to  Acme\r\nnewsletter' })).status, 204);
+  rules = (await call('GET', '/api/mail/rules')).json;
+  const future = rules.rules.find((r: Json) => r.address === 'future@quartzworks.example');
+  assert.deepEqual([future.blocked, future.note, future.blockedCount, future.total], [true, 'Given to Acme newsletter', 0, 0]);
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'future@quartzworks.example', blocked: false })).status, 204);
 
   assert.equal((await call('POST', '/api/mail/rules/reset', { address: 'github@eisenberg.dev' })).status, 204);
   rules = (await call('GET', '/api/mail/rules')).json;
@@ -549,4 +581,305 @@ test('web app files are served', async () => {
   const sw = fs.readFileSync('public/sw.js', 'utf8');
   assert.ok(!/addEventListener\(['"]fetch/.test(sw), 'the service worker must not intercept or cache requests');
   assert.ok(fs.existsSync('public/icons/apple-touch-icon.png'));
+});
+
+// ================================================================================================
+// conversations, bulk read, contacts, drafts, settings, filters, retention, users, passkeys
+// ================================================================================================
+
+const rawMail = (headers: Record<string, string>, body = 'hello\r\n') => Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join('\r\n') + `\r\n\r\n${body}`;
+async function deliver(id: string, to: string, headers: Record<string, string>, body?: string) {
+  const { ingestPending } = await import('../src/server/ingest.js');
+  const event = { mail: { timestamp: new Date().toISOString() }, receipt: { recipients: [to], spfVerdict: { status: 'PASS' } } };
+  await local.pool.query('insert into lambda_inbox (message_id, event, email_raw) values ($1, $2, $3)', [id, JSON.stringify(event), Buffer.from(rawMail({ To: to, ...headers }, body))]);
+  await ingestPending({ force: true });
+}
+const first = async (query: string): Promise<Json> => ((await call('GET', `/api/mail/messages?${query}`)).json as MessageList).messages[0];
+
+test('schema: applied at start-up only when it changed', async () => {
+  const { ensureSchema } = await import('../src/server/schema.js');
+  assert.ok(['applied', 'current'].includes(await ensureSchema()));
+  assert.equal(await ensureSchema(), 'current');
+  assert.equal((await Promise.all([ensureSchema(), ensureSchema(), ensureSchema()])).join(), 'current,current,current');
+});
+
+test('conversations: a reply joins the thread of the message it answers', async () => {
+  const original = await first('mailbox=inbox&q=scope%20question');
+  assert.equal(original.threadCount, 2); // the seeded reply from the webmail
+  const detail: MessageDetail = (await call('GET', `/api/mail/messages/${original.id}`)).json;
+  assert.deepEqual(detail.thread.map((m) => m.direction), ['in', 'out']);
+  assert.equal(detail.thread[0].id, original.id);
+
+  await deliver('thread-3', 'hello@quartzworks.example', { From: 'Marcus Lee <marcus.lee@bluepeak.example>', Subject: 'Re: Data warehouse migration: scope question', 'In-Reply-To': detail.thread[1] ? '<unknown@x.example>' : '', References: '<scope-7@bluepeak.example>' }, 'Sounds good.\r\n');
+  const again: MessageDetail = (await call('GET', `/api/mail/messages/${original.id}`)).json;
+  assert.equal(again.thread.length, 3);
+  assert.equal(again.thread[2].snippet, 'Sounds good.');
+  // an unrelated message starts its own conversation
+  const other = await first('mailbox=inbox&q=Fractional');
+  assert.equal(other.threadCount, 1);
+  assert.notEqual(other.threadId, original.threadId);
+});
+
+test('mark all as read is limited to the mailbox view it was asked for', async () => {
+  await deliver('unread-1', 'bulk@quartzworks.example', { From: 'a@a.example', Subject: 'one' });
+  await deliver('unread-2', 'bulk@quartzworks.example', { From: 'b@b.example', Subject: 'two' });
+  const before: MailboxTree = (await call('GET', '/api/mail/mailboxes')).json;
+  const res = await call('POST', '/api/mail/mark-read', { mailbox: 'inbox', address: 'bulk@quartzworks.example' });
+  assert.equal(res.json.changed, 2);
+  const after: MailboxTree = (await call('GET', '/api/mail/mailboxes')).json;
+  assert.equal(after.inbox.unread, before.inbox.unread - 2);
+  assert.equal((await call('POST', '/api/mail/mark-read', { mailbox: 'nope' })).status, 400);
+});
+
+test('contacts: people written to and from, for recipient autocomplete', async () => {
+  const jane = (await call('GET', '/api/mail/contacts?q=jane')).json;
+  assert.deepEqual(jane[0], { name: 'Jane Park', address: 'jane.park@northwind.example' });
+  const byAddress = (await call('GET', '/api/mail/contacts?q=bluepeak')).json;
+  assert.equal(byAddress[0].address, 'marcus.lee@bluepeak.example');
+  assert.deepEqual((await call('GET', '/api/mail/contacts?q=%25')).json, []);
+  assert.deepEqual((await call('GET', '/api/mail/contacts?q=')).json, []);
+});
+
+test('drafts: autosave, list, send removes the draft', async () => {
+  const id = '11111111-2222-4333-8444-555555555555';
+  const payload = { mode: 'new', from: 'sam@eisenberg.dev', to: 'x@y.example', cc: '', subject: 'Draft subject', text: 'work in progress' };
+  assert.equal((await call('POST', '/api/mail/drafts', { id, payload })).status, 204);
+  assert.equal((await call('POST', '/api/mail/drafts', { id, payload: { ...payload, text: 'more work', subject: 'Draft\r\nBcc: x@evil.example' } })).status, 204);
+  const list = (await call('GET', '/api/mail/drafts')).json;
+  assert.equal(list.length, 1);
+  assert.equal(list[0].payload.text, 'more work');
+  assert.equal(list[0].payload.subject, 'Draft Bcc: x@evil.example'); // one line
+  assert.equal((await call('POST', '/api/mail/drafts', { id: 'not-a-uuid', payload })).status, 400);
+
+  const sentNow = await call('POST', '/api/mail/send', { from: 'sam@eisenberg.dev', to: ['x@y.example'], subject: 'Draft subject', text: 'done', draftId: id });
+  assert.equal(sentNow.status, 200, sentNow.text);
+  assert.deepEqual((await call('GET', '/api/mail/drafts')).json, []);
+});
+
+test('settings: signature per user; filters act when mail is indexed', async () => {
+  assert.equal((await call('POST', '/api/mail/settings', { signature: 'Sam Eisenberg\r\neisenberg.dev' })).status, 204);
+  let settings = (await call('GET', '/api/mail/settings')).json;
+  assert.equal(settings.signature, 'Sam Eisenberg\neisenberg.dev');
+  assert.equal(settings.purgeAfterDays, 30);
+
+  assert.equal((await call('POST', '/api/mail/filters', { action: 'archive' })).status, 400); // no condition
+  assert.equal((await call('POST', '/api/mail/filters', { matchFrom: 'x', action: 'explode' })).status, 400);
+  assert.equal((await call('POST', '/api/mail/filters', { matchFrom: 'DMARC Reporter', matchAddress: 'dmarc@', action: 'archive' })).status, 204);
+  assert.equal((await call('POST', '/api/mail/filters', { matchSubject: 'invoice', action: 'flag' })).status, 204);
+  settings = (await call('GET', '/api/mail/settings')).json;
+  assert.equal(settings.filters.length, 2);
+
+  await deliver('filter-1', 'dmarc@eisenberg.dev', { From: 'DMARC Reporter <noreply@reports.example>', Subject: 'Report domain: eisenberg.dev' });
+  await deliver('filter-2', 'dmarc@eisenberg.dev', { From: 'Someone Else <x@reports.example>', Subject: 'Your Invoice 77' });
+  const archived = await first('mailbox=archive&address=dmarc@eisenberg.dev');
+  assert.equal(archived.subject, 'Report domain: eisenberg.dev');
+  const flagged = await first('mailbox=inbox&address=dmarc@eisenberg.dev');
+  assert.deepEqual([flagged.subject, flagged.isFlagged], ['Your Invoice 77', true]);
+
+  // a disabled filter does nothing
+  await call('POST', '/api/mail/filters/update', { id: settings.filters[1].id, enabled: false });
+  await deliver('filter-3', 'dmarc@eisenberg.dev', { From: 'x@reports.example', Subject: 'another invoice' });
+  assert.equal((await first('mailbox=inbox&address=dmarc@eisenberg.dev&q=another')).isFlagged, false);
+  for (const f of settings.filters) await call('POST', '/api/mail/filters/delete', { id: f.id });
+  assert.equal((await call('GET', '/api/mail/settings')).json.filters.length, 0);
+});
+
+test('retention: Trash and Junk empty themselves after the configured time', async () => {
+  await deliver('old-trash', 'retention@quartzworks.example', { From: 'a@a.example', Subject: 'old trash' });
+  await deliver('new-trash', 'retention@quartzworks.example', { From: 'a@a.example', Subject: 'new trash' });
+  await local.pool.query(`update messages set mailbox = 'trash', prev_mailbox = 'inbox', trashed_at = now() - interval '40 days' where raw_id = 'old-trash'`);
+  await local.pool.query(`update messages set mailbox = 'trash', prev_mailbox = 'inbox', trashed_at = now() - interval '2 days' where raw_id = 'new-trash'`);
+  await local.pool.query('update mail_settings set last_purge_at = null');
+  await call('GET', '/api/mail/mailboxes');
+  const left = await local.pool.query(`select message_id from lambda_inbox where message_id in ('old-trash', 'new-trash')`);
+  assert.deepEqual(left.rows.map((r) => r.message_id), ['new-trash']);
+  // and not again until tomorrow
+  await local.pool.query(`update messages set trashed_at = now() - interval '40 days' where raw_id = 'new-trash'`);
+  await call('GET', '/api/mail/mailboxes');
+  assert.equal((await local.pool.query(`select 1 from lambda_inbox where message_id = 'new-trash'`)).rowCount, 1);
+});
+
+test('attachments: only plain images can be shown in place', async () => {
+  const logos = await first('mailbox=inbox&q=Logo%20concepts');
+  const detail: MessageDetail = (await call('GET', `/api/mail/messages/${logos.id}`)).json;
+  assert.equal(detail.attachments[0].previewable, true);
+  const img = await call('GET', `/api/mail/messages/${logos.id}/attachments/0?inline=1`);
+  assert.match(img.headers.get('content-disposition') ?? '', /^inline/);
+  assert.equal(img.headers.get('content-type'), 'image/png');
+  assert.match(img.headers.get('content-security-policy') ?? '', /sandbox/);
+
+  const brief = await first('mailbox=inbox&q=Fractional');
+  const pdf = await call('GET', `/api/mail/messages/${brief.id}/attachments/0?inline=1`);
+  assert.match(pdf.headers.get('content-disposition') ?? '', /^attachment/);
+  assert.equal(((await call('GET', `/api/mail/messages/${brief.id}`)).json as MessageDetail).attachments[0].previewable, false);
+});
+
+let memberCookie = '';
+const asMember = () => ({ noCookie: true, headers: { cookie: memberCookie } });
+
+test('users: a member sees only the mail of their domains', async () => {
+  assert.equal((await call('GET', '/api/auth/me')).json.role, 'owner');
+  assert.equal((await call('POST', '/api/users', { username: 'pat', password: 'short', domains: ['harborlight.example'] })).status, 400);
+  assert.equal((await call('POST', '/api/users', { username: 'pat', password: 'a-long-enough-password', domains: [] })).status, 400);
+  assert.equal((await call('POST', '/api/users', { username: 'pat', password: 'a-long-enough-password', domains: ['not-mine.example'] })).status, 400);
+  assert.equal((await call('POST', '/api/users', { username: 'Pat', password: 'a-long-enough-password', domains: ['harborlight.example'] })).status, 204);
+  assert.equal((await call('POST', '/api/users', { username: 'pat', password: 'a-long-enough-password', domains: ['harborlight.example'] })).status, 409);
+  const listed = (await call('GET', '/api/users')).json;
+  assert.deepEqual(listed.map((u: Json) => [u.username, u.role, u.domains]), [[DEV_USER.username, 'owner', null], ['pat', 'member', ['harborlight.example']]]);
+
+  const login = await call('POST', '/api/auth/login', { username: 'pat', password: 'a-long-enough-password' }, { noCookie: true, headers: { 'x-forwarded-for': '198.51.100.201' } });
+  assert.equal(login.status, 200, login.text);
+  assert.deepEqual([login.json.role, login.json.domains], ['member', ['harborlight.example']]);
+  memberCookie = login.headers.getSetCookie().find((c) => c.startsWith('eisenmail_dev='))!.split(';')[0];
+
+  const tree: MailboxTree = (await call('GET', '/api/mail/mailboxes', undefined, asMember())).json;
+  assert.deepEqual(tree.domains.map((d) => d.domain), ['harborlight.example']);
+  const ownerTree: MailboxTree = (await call('GET', '/api/mail/mailboxes')).json;
+  assert.ok(tree.inbox.total > 0 && tree.inbox.total < ownerTree.inbox.total);
+
+  const list: MessageList = (await call('GET', '/api/mail/messages?mailbox=inbox&limit=200', undefined, asMember())).json;
+  assert.equal(list.messages.length, tree.inbox.total);
+  assert.ok(list.messages.every((m) => m.addresses.length > 0 && m.addresses.every((a) => a.endsWith('@harborlight.example'))), 'addresses on other domains are not shown');
+  // a message that also went to an address on another domain is visible, without that address
+  assert.ok(list.messages.some((m) => m.subject.startsWith('Harborlight LLC: annual report')));
+
+  // everything about another domain's mail is "not found" for the member
+  const foreign = await first('mailbox=inbox&q=Fractional');
+  assert.equal((await call('GET', `/api/mail/messages/${foreign.id}`, undefined, asMember())).status, 404);
+  assert.equal((await call('GET', `/api/mail/messages/${foreign.id}/raw`, undefined, asMember())).status, 404);
+  assert.equal((await call('GET', `/api/mail/messages/${foreign.id}/attachments/0`, undefined, asMember())).status, 404);
+  assert.equal((await call('PATCH', '/api/mail/messages', { ids: [foreign.id], set: { isFlagged: true, mailbox: 'trash' } }, asMember())).json.changed, 0);
+  assert.equal(((await call('GET', `/api/mail/messages/${foreign.id}`)).json as MessageDetail).mailbox, 'inbox');
+  assert.equal((await call('POST', '/api/mail/messages/delete', { ids: [foreign.id] }, asMember())).json.deleted, 0);
+  // asking for another domain's folder only ever returns mail the member may see anyway (here: the one cross-domain message)
+  const sneaky: MessageList = (await call('GET', '/api/mail/messages?mailbox=inbox&domain=eisenberg.dev', undefined, asMember())).json;
+  assert.ok(sneaky.messages.length <= 1 && sneaky.messages.every((m) => m.addresses.every((a) => a.endsWith('@harborlight.example'))));
+  assert.equal(((await call('GET', '/api/mail/messages?mailbox=inbox&address=sam@eisenberg.dev&q=Fractional', undefined, asMember())).json as MessageList).messages.length, 0);
+  assert.equal(((await call('GET', '/api/mail/messages?mailbox=inbox&q=Fractional', undefined, asMember())).json as MessageList).messages.length, 0);
+  assert.equal((await call('POST', '/api/mail/send', { from: 'sam@eisenberg.dev', to: ['x@y.example'], subject: 's', text: 't' }, asMember())).status, 400);
+  assert.equal((await call('POST', '/api/mail/send', { from: 'pat@harborlight.example', to: ['x@y.example'], subject: 's', text: 't', inReplyToId: foreign.id }, asMember())).status, 404);
+  assert.equal((await call('POST', '/api/mail/send', { from: 'pat@harborlight.example', to: ['x@y.example'], subject: 's', text: 't' }, asMember())).status, 200);
+  assert.deepEqual((await call('GET', '/api/mail/identities', undefined, asMember())).json.domains, ['harborlight.example']);
+  assert.deepEqual((await call('GET', '/api/mail/contacts?q=jane', undefined, asMember())).json, []);
+
+  // rules: only their domain; global settings and admin are the owner's
+  const rules = (await call('GET', '/api/mail/rules', undefined, asMember())).json;
+  assert.ok(rules.rules.length > 0 && rules.rules.every((r: Json) => r.address.endsWith('@harborlight.example')));
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'billing@harborlight.example', notify: false }, asMember())).status, 204);
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'sam@eisenberg.dev', forward: false }, asMember())).status, 403);
+  for (const [method, url, body] of [
+    ['POST', '/api/mail/rules/defaults', { forward: false }],
+    ['POST', '/api/mail/filters', { matchFrom: 'x', action: 'trash' }],
+    ['POST', '/api/mail/settings', { purgeAfterDays: 1 }],
+    ['GET', '/api/users', undefined],
+    ['POST', '/api/users', { username: 'eve', password: 'a-long-enough-password', domains: ['eisenberg.dev'] }],
+    ['GET', '/api/files', undefined],
+    ['POST', '/api/files/uploads', { name: 'x.txt', size: 1, contentType: 'text/plain' }],
+  ] as const) {
+    assert.equal((await call(method, url, body, asMember())).status, 403, `${method} ${url}`);
+  }
+  // drafts are private to each user
+  await call('POST', '/api/mail/drafts', { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', payload: { mode: 'new', from: '', to: '', cc: '', subject: 'owner draft', text: '' } });
+  assert.deepEqual((await call('GET', '/api/mail/drafts', undefined, asMember())).json, []);
+  assert.equal((await call('POST', '/api/mail/drafts', { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', payload: { mode: 'new', from: '', to: '', cc: '', subject: 'hijack', text: '' } }, asMember())).status, 404);
+  assert.equal((await call('GET', '/api/mail/drafts')).json[0].payload.subject, 'owner draft');
+
+  // the owner changes the member's domains, then removes the member
+  const pat = listed.find((u: Json) => u.username === 'pat');
+  assert.equal((await call('POST', '/api/users/update', { id: pat.id, domains: ['quartzworks.example'] })).status, 204);
+  assert.deepEqual(((await call('GET', '/api/mail/mailboxes', undefined, asMember())).json as MailboxTree).domains.map((d) => d.domain), ['quartzworks.example']);
+  assert.equal((await call('POST', '/api/users/update', { id: listed[0].id, domains: ['eisenberg.dev'] })).status, 400); // owners are not editable here
+  assert.equal((await call('POST', '/api/users/delete', { id: pat.id })).status, 204);
+  assert.equal((await call('GET', '/api/auth/me', undefined, asMember())).status, 401);
+});
+
+test('passkeys: options are single-use challenges; registration needs the password', async () => {
+  const options = await call('POST', '/api/auth/passkey/login-options', {}, { noCookie: true });
+  assert.equal(options.status, 200);
+  assert.ok(options.json.challenge.length >= 20);
+  assert.equal(options.json.userVerification, 'required');
+  assert.equal(options.json.allowCredentials, undefined, 'reveals no accounts');
+  const challengeCookie = options.headers.getSetCookie().find((c) => c.startsWith('eisenmail_dev_wa='))!;
+  assert.match(challengeCookie, /HttpOnly; SameSite=Strict/);
+  const waCookie = challengeCookie.split(';')[0];
+
+  const bogus = { id: 'AAAA', rawId: 'AAAA', type: 'public-key', response: { clientDataJSON: 'e30', authenticatorData: 'AA', signature: 'AA' }, clientExtensionResults: {} };
+  assert.equal((await call('POST', '/api/auth/passkey/login', { response: bogus }, { noCookie: true, headers: { cookie: waCookie } })).status, 401);
+  // the challenge was consumed by that attempt
+  assert.equal((await call('POST', '/api/auth/passkey/login', { response: bogus }, { noCookie: true, headers: { cookie: waCookie } })).json.code, 'passkey_expired');
+  assert.equal((await call('POST', '/api/auth/passkey/login', { response: bogus }, { noCookie: true })).json.code, 'passkey_expired');
+
+  assert.equal((await call('POST', '/api/auth/passkeys/register-options', { currentPassword: 'wrong-wrong-wrong' })).status, 403);
+  const reg = await call('POST', '/api/auth/passkeys/register-options', { currentPassword: DEV_USER.password });
+  assert.equal(reg.status, 200);
+  assert.equal(reg.json.authenticatorSelection.userVerification, 'required');
+  assert.deepEqual((await call('GET', '/api/auth/passkeys')).json, []);
+});
+
+test('review fixes: what a member can infer, and what a password change invalidates', async () => {
+  const keys = { p256dh: 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM', auth: 'tBHItJI5svbpez7KI4CCXg' };
+  // usernames are unique without regard to case
+  assert.equal((await call('POST', '/api/users', { username: DEV_USER.username.toUpperCase(), password: 'a-long-enough-password', domains: ['harborlight.example'] })).status, 409);
+  assert.equal((await call('POST', '/api/users', { username: 'kim', password: 'a-long-enough-password', domains: ['harborlight.example'] })).status, 204);
+  const login = await call('POST', '/api/auth/login', { username: 'kim', password: 'a-long-enough-password' }, { noCookie: true, headers: { 'x-forwarded-for': '198.51.100.210' } });
+  const kim = { noCookie: true, headers: { cookie: login.headers.getSetCookie().find((c) => c.startsWith('eisenmail_dev='))!.split(';')[0] } };
+
+  // a conversation on another domain cannot be sized up through a reply that lands on the member's domain
+  const foreign = await first('mailbox=inbox&q=Fractional');
+  const foreignDetail: MessageDetail = (await call('GET', `/api/mail/messages/${foreign.id}`)).json;
+  await deliver('oracle-1', 'info@harborlight.example', { From: 'x@x.example', Subject: 'Re: probing', 'In-Reply-To': foreignDetail.messageIdHeader ?? '<none@x.example>', 'Message-ID': '<oracle-1@x.example>' });
+  const seen = ((await call('GET', '/api/mail/messages?mailbox=inbox&q=probing', undefined, kim)).json as MessageList).messages[0];
+  assert.equal(seen.threadCount, 1, 'the member sees only their own message in the thread');
+  assert.equal(((await call('GET', `/api/mail/messages/${seen.id}`, undefined, kim)).json as MessageDetail).thread.length, 1);
+  assert.equal((await first('mailbox=inbox&q=probing')).threadCount, 2, 'the owner sees the whole conversation');
+
+  // a hidden co-recipient on another domain cannot be found by search or by the folder filters
+  await local.pool.query(
+    `insert into lambda_inbox (message_id, event, email_raw) values ('hidden-1', $1, $2)`,
+    [JSON.stringify({ mail: { timestamp: new Date().toISOString() }, receipt: { recipients: ['info@harborlight.example', 'hidden-alias-7731@eisenberg.dev'] } }), Buffer.from(rawMail({ From: 'y@y.example', To: 'undisclosed-recipients:;', Subject: 'two recipients' }))],
+  );
+  await (await import('../src/server/ingest.js')).ingestPending({ force: true });
+  const count = async (query: string, as?: typeof kim) => ((await call('GET', `/api/mail/messages?mailbox=inbox&${query}`, undefined, as)).json as MessageList).messages.length;
+  assert.equal(await count('q=two%20recipients', kim), 1);
+  assert.equal(await count('q=hidden-alias-77', kim), 0);
+  assert.equal(await count('q=info@harborlight', kim) > 0, true);
+  assert.equal(await count('address=hidden-alias-7731@eisenberg.dev', kim), 0);
+  assert.equal(await count('domain=eisenberg.dev', kim), 0);
+  assert.equal(await count('q=hidden-alias-77'), 1, 'the owner can search it');
+
+  // blocking is the owner's decision
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'info@harborlight.example', blocked: true }, kim)).status, 403);
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'info@harborlight.example', note: 'front desk' }, kim)).status, 204);
+
+  // autocomplete: a stranger's display name that looks like an address is not shown, and people written to come first
+  for (let i = 0; i < 6; i++) await deliver(`poison-${i}`, 'sam@eisenberg.dev', { From: '"jane.park@northwind.example" <jane.park@northwind.example.evil.test>', Subject: `hello ${i}` });
+  const suggestions = (await call('GET', '/api/mail/contacts?q=jane')).json;
+  assert.equal(suggestions[0].address, 'jane.park@northwind.example', 'the person actually written to ranks first');
+  const planted = suggestions.find((c: Json) => c.address.endsWith('.evil.test'));
+  assert.ok(!planted || planted.name === '', 'a display name that imitates an address is dropped');
+
+  // an owner's reset of a member removes the member's sessions and notification subscriptions
+  assert.equal((await call('POST', '/api/push/subscribe', { endpoint: 'https://web.push.apple.com/kim-phone', keys }, kim)).status, 204);
+  const users = (await call('GET', '/api/users')).json;
+  const kimId = users.find((u: Json) => u.username === 'kim').id;
+  assert.equal((await call('POST', '/api/users/update', { id: kimId, password: 'another-long-password' })).status, 204);
+  assert.equal((await call('GET', '/api/auth/me', undefined, kim)).status, 401);
+  assert.equal((await local.pool.query('select 1 from push_subscriptions where user_id = $1', [kimId])).rowCount, 0);
+  await call('POST', '/api/users/delete', { id: kimId });
+
+  // changing your own password removes passkeys, trusted browsers and notification subscriptions
+  const me = (await local.pool.query('select id from webmail_users where email = $1', [DEV_USER.username])).rows[0].id;
+  await call('POST', '/api/push/subscribe', { endpoint: 'https://web.push.apple.com/owner-phone', keys });
+  await local.pool.query(`insert into webauthn_credentials (credential_id, user_id, public_key) values ('planted-by-intruder', $1, '\\x00')`, [me]);
+  assert.equal((await call('POST', '/api/auth/password', { currentPassword: DEV_USER.password, newPassword: 'a-brand-new-password-1' })).status, 204);
+  for (const table of ['webauthn_credentials', 'push_subscriptions', 'webmail_devices']) {
+    assert.equal((await local.pool.query(`select 1 from ${table} where user_id = $1`, [me])).rowCount, 0, table);
+  }
+  assert.equal((await call('GET', '/api/auth/me')).status, 200, 'this session stays');
+  assert.equal((await call('POST', '/api/auth/password', { currentPassword: 'a-brand-new-password-1', newPassword: DEV_USER.password })).status, 204);
+
+  // signing out takes the device's subscription with it
+  await call('POST', '/api/push/subscribe', { endpoint: 'https://web.push.apple.com/owner-phone', keys });
+  assert.equal((await call('POST', '/api/auth/logout', { pushEndpoint: 'https://web.push.apple.com/owner-phone' })).status, 204);
+  assert.equal((await local.pool.query('select 1 from push_subscriptions where user_id = $1', [me])).rowCount, 0);
 });

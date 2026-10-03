@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { Archive, ArchiveRestore, ChevronLeft, Flag, Forward, Inbox, MailOpen, Reply, ReplyAll, Search, ShieldAlert, SquarePen, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, CheckCheck, ChevronLeft, Ellipsis, Flag, Forward, Inbox, MailOpen, Reply, ReplyAll, Search, ShieldAlert, SquarePen, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -10,7 +10,8 @@ import { cn } from "@/lib/utils";
 import { get } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { Compose, draftFor, type Draft } from "./compose";
-import { scopeTitle, useDeleteForever, useEmptyMailbox, useIdentities, useMailboxes, useMailLocation, useMessage, useMessages, usePatchMessages } from "./data";
+import { scopeTitle, useDeleteForever, useDrafts, useEmptyMailbox, useIdentities, useMailboxes, useMailLocation, useMailSettings, useMarkAllRead, useMessage, useMessages, usePatchMessages } from "./data";
+import { DraftsList } from "./drafts-list";
 import { InstallHint } from "./install-hint";
 import { MessageList, type RowAction } from "./message-list";
 import { Reader } from "./reader";
@@ -58,6 +59,10 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
   const patchMessages = usePatchMessages();
   const deleteForever = useDeleteForever();
   const emptyMailbox = useEmptyMailbox();
+  const markAllRead = useMarkAllRead();
+  const drafts = useDrafts();
+  const settings = useMailSettings();
+  const isDrafts = scope.box === "drafts";
 
   const messages = useMemo(() => list.data?.pages.flatMap((p) => p.messages) ?? [], [list.data]);
   const [selected, setSelected] = useState<Set<string>>(() => new Set(id ? [id] : []));
@@ -170,10 +175,11 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
 
   const compose = async (mode: Draft["mode"], m?: MessageSummary) => {
     const fallback = scope.address ?? identities.data?.defaultFrom ?? "";
-    if (mode === "new" || !m) return setDraft(draftFor("new", null, fallback));
+    const signature = settings.data?.signature ?? "";
+    if (mode === "new" || !m) return setDraft(draftFor("new", null, fallback, signature));
     try {
       const detail = await qc.fetchQuery({ queryKey: ["message", m.id], queryFn: () => get<MessageDetail>(`/mail/messages/${m.id}`), staleTime: 5 * 60_000 });
-      setDraft(draftFor(mode, detail, fallback));
+      setDraft(draftFor(mode, detail, fallback, signature));
     } catch {
       /* the reader shows the error */
     }
@@ -253,9 +259,28 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
   const emptyAll = (box: "trash" | "junk") => {
     if (window.confirm(`Permanently delete everything in ${box === "trash" ? "Trash" : "Junk"}? This cannot be undone.`)) emptyMailbox.mutate(box);
   };
-  const countLine =
-    (q ? `${total}${list.hasNextPage ? "+" : ""} found` : `${total}${list.hasNextPage ? "+" : ""} message${total === 1 ? "" : "s"}`) +
-    (scope.box === "inbox" && tree.data && !q && !scope.address && !scope.domain && tree.data.inbox.unread > 0 ? `, ${tree.data.inbox.unread} unread` : "");
+  const retention = settings.data?.purgeAfterDays ?? 30;
+  const countLine = isDrafts
+    ? `${drafts.data?.length ?? 0} draft${drafts.data?.length === 1 ? "" : "s"}`
+    : (q ? `${total}${list.hasNextPage ? "+" : ""} found` : `${total}${list.hasNextPage ? "+" : ""} message${total === 1 ? "" : "s"}`) +
+      (scope.box === "inbox" && tree.data && !q && !scope.address && !scope.domain && tree.data.inbox.unread > 0 ? `, ${tree.data.inbox.unread} unread` : "") +
+      (inTrash && retention > 0 ? `, deleted after ${retention} days` : "");
+  /** Actions on the whole mailbox view. */
+  const listMenu = !isDrafts && (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        {mobile ? (
+          <button type="button" aria-label="Mailbox actions" className="text-primary flex h-11 min-w-11 items-center justify-center rounded-lg active:bg-accent [&_svg]:size-[22px]"><Ellipsis /></button>
+        ) : (
+          <Button variant="ghost" size="icon-sm" aria-label="Mailbox actions" className="text-muted-foreground hover:text-foreground"><Ellipsis /></Button>
+        )}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56 max-md:[&_[role=menuitem]]:py-2.5 max-md:[&_[role=menuitem]]:text-[16px]">
+        <DropdownMenuItem onSelect={() => markAllRead.mutate(scope)}><CheckCheck /> Mark all as read</DropdownMenuItem>
+        {inTrash && <DropdownMenuItem variant="destructive" onSelect={() => emptyAll(scope.box as "trash" | "junk")}><Trash2 /> {scope.box === "junk" ? "Erase Junk Mail…" : "Erase Deleted Items…"}</DropdownMenuItem>}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
   const searchField = (
     <div className={cn("bg-muted flex items-center gap-1.5 rounded-md px-2", mobile ? "h-9 rounded-[10px]" : "h-7")}>
       <Search className="text-muted-foreground size-3.5 shrink-0 max-md:size-4" />
@@ -273,7 +298,9 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
       {searchText && <button type="button" aria-label="Clear search" onClick={() => setSearchText("")} className="text-muted-foreground hover:text-foreground"><X className="size-3.5 max-md:size-5" /></button>}
     </div>
   );
-  const listPane = (
+  const listPane = isDrafts ? (
+    <DraftsList mobile={mobile} onOpen={(d) => setDraft({ ...d.payload, id: d.id })} />
+  ) : (
     <MessageList
       mobile={mobile}
       messages={messages}
@@ -289,7 +316,7 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
       emptyText={list.error ? (list.error as Error).message : q ? "No messages match your search" : "No Messages"}
     />
   );
-  const composer = draft && <Compose key={`${draft.mode}-${draft.inReplyToId ?? "new"}`} draft={draft} onClose={() => setDraft(null)} />;
+  const composer = draft && <Compose key={`${draft.mode}-${draft.inReplyToId ?? "new"}-${draft.id ?? ""}`} draft={draft} onClose={() => setDraft(null)} />;
 
   // ---- phone: one screen at a time, like iOS Mail (Mailboxes > list > message) ------------------
   if (mobile) {
@@ -300,7 +327,7 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
         {screen === "boxes" && (
           <div className="bg-sidebar pt-safe flex min-h-0 flex-1 flex-col">
             {header}
-            <Sidebar mobile tree={tree.data} scope={scope} onSelect={loc.setScope} onEmpty={emptyAll} />
+            <Sidebar mobile tree={tree.data} scope={scope} onSelect={loc.setScope} onEmpty={emptyAll} drafts={drafts.data?.length} />
             <div className="pb-safe">{footer}</div>
           </div>
         )}
@@ -311,13 +338,14 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
               <div className="flex h-12 items-center gap-1 px-1">
                 <TouchButton label="Mailboxes" onClick={loc.openBoxes} className="pr-3 pl-1"><ChevronLeft /> <span>Mailboxes</span></TouchButton>
                 <div className="flex-1" />
+                {listMenu}
                 <TouchButton label="New Message" onClick={() => void compose("new")}><SquarePen /></TouchButton>
               </div>
               <div className="px-4 pb-2">
                 <h1 className="truncate text-[28px] leading-tight font-bold tracking-tight" title={scopeTitle(scope)}>{scopeTitle(scope)}</h1>
                 <div className="text-muted-foreground text-[13px]">{countLine}</div>
               </div>
-              <div className="px-4 pb-2.5">{searchField}</div>
+              {!isDrafts && <div className="px-4 pb-2.5">{searchField}</div>}
             </header>
             <InstallHint />
             {listPane}
@@ -375,12 +403,7 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
       <Group orientation="horizontal" id="eisenmail-panes" className="min-h-0 flex-1">
         <Panel id="sidebar" defaultSize="240px" minSize="190px" maxSize="380px" className="bg-sidebar flex flex-col border-r">
           {header}
-          <Sidebar
-            tree={tree.data}
-            scope={scope}
-            onSelect={loc.setScope}
-            onEmpty={emptyAll}
-          />
+          <Sidebar tree={tree.data} scope={scope} onSelect={loc.setScope} onEmpty={emptyAll} drafts={drafts.data?.length} />
           {footer}
         </Panel>
         <Separator className="w-px bg-transparent outline-none data-[separator=active]:bg-primary data-[separator=hover]:bg-primary/60" />
@@ -391,9 +414,10 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
               <div className="truncate text-[13px] font-bold" title={scopeTitle(scope)}>{scopeTitle(scope)}</div>
               <div className="text-muted-foreground truncate text-[11px]">{countLine}</div>
             </div>
+            {listMenu}
             <ToolButton label="New Message" shortcut="N" onClick={() => void compose("new")}><SquarePen /></ToolButton>
           </div>
-          <div className="shrink-0 px-3 pt-2 pb-1">{searchField}</div>
+          {!isDrafts && <div className="shrink-0 px-3 pt-2 pb-1">{searchField}</div>}
           {listPane}
         </Panel>
         <Separator className="w-px bg-transparent outline-none data-[separator=active]:bg-primary data-[separator=hover]:bg-primary/60" />

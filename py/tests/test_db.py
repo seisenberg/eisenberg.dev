@@ -257,8 +257,10 @@ def test_delivery_rule_and_push_statements():
     assert database.resolve_address_rule("a@eisenberg.dev") == {"forward": False, "notify": True,
                                                                "forward_style": "attach"}
 
-    connect.rows = [{"endpoint": "https://fcm.googleapis.com/x", "p256dh": "p", "auth": "a"}]
+    connect.rows = [{"endpoint": "https://fcm.googleapis.com/x", "p256dh": "p", "auth": "a", "role": "owner",
+                     "domains": None}]
     assert database.list_push_subscriptions(20) == connect.rows
+    assert "join webmail_users u on u.id = s.user_id" in connect.statements[-1][1]
     database.push_succeeded("e")
     database.push_failed("e")
     database.delete_push_subscription("e")
@@ -270,10 +272,49 @@ def test_delivery_rule_and_push_statements():
     assert materialise == ("insert into address_rules (address, forward, notify, forward_style) "
                            "select %s, default_forward, default_notify, default_forward_style from mail_settings "
                            "on conflict (address) do nothing")
-    assert "limit %s" in statements[-4] and connect.statements[-4][2] == (20,)
+    assert "limit %s" in statements[-4] and connect.statements[-4][2] == (5, 20)   # (per user, overall)
     assert "last_success_at = now(), failure_count = 0" in statements[-3]
     assert "failure_count = failure_count + 1" in statements[-2]
     assert statements[-1].startswith("delete from push_subscriptions where endpoint = %s")
+
+
+def test_blocked_log_reconcile_and_unread_statements():
+    connect = FakeConnect()
+    database = dbmod.Database(DB, connect=connect)
+
+    assert database.record_blocked([]) == [] and connect.statements == []          # nothing to look up
+    connect.rows = [{"address": "a@eisenberg.dev"}]
+    assert database.record_blocked(["a@eisenberg.dev", "b@eisenberg.dev"]) == ["a@eisenberg.dev"]
+    _, sql, params = connect.statements[-1]
+    assert sql == ("update address_rules set blocked_count = blocked_count + 1, last_blocked_at = now() "
+                   "where blocked and address = any(%s) returning address")
+    assert params == (["a@eisenberg.dev", "b@eisenberg.dev"],)
+
+    database.log_outcome("m1", "forwarded")
+    _, sql, params = connect.statements[-1]
+    assert sql == ("insert into inbox_log (message_id, outcome) values (%s, %s) "
+                   "on conflict (message_id) do update set outcome = excluded.outcome, at = now()")
+    assert params == ("m1", "forwarded")
+
+    connect.rows = [{"id": "m1"}, {"id": "m3"}]
+    before = len(connect.statements)
+    assert database.handled_message_ids([f"m{n}" for n in range(1, 1202)]) == {"m1", "m3"}
+    batches = connect.statements[before:]
+    assert [len(params[0]) for _, _, params in batches] == [500, 500, 201]             # = any($1), in batches
+    assert all(sql.count("= any(%s)") == 3 and len(params) == 3 for _, sql, params in batches)
+    assert "meta->>'relay_source_id'" in batches[0][1] and "inbox_log" in batches[0][1]
+    assert database.handled_message_ids([]) == set()
+
+    connect.rows = [{"unread": 12}]
+    assert database.count_unread() == 12
+    assert connect.statements[-1][2] == () and "domains &&" not in connect.statements[-1][1]
+    assert database.count_unread(["Shop.Example"]) == 12
+    _, sql, params = connect.statements[-1]
+    assert params == (["shop.example"], ["shop.example"]) and "domains && %s" in sql and "processed_at is null" in sql
+
+    connect.rows = [{"endpoint": "e1"}, {"endpoint": "e2"}]
+    assert database.delete_orphan_push_subscriptions() == 2
+    assert "not exists (select 1 from webmail_users u where u.id = s.user_id)" in connect.statements[-1][1]
 
 
 # ------------------------------------------------------------------------------------------

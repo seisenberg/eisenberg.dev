@@ -21,7 +21,7 @@ COPY py/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Only the runtime modules: no tests, no virtualenv, no key material.
-COPY py/config.py py/db.py py/relay.py py/push.py py/inbox.py ./
+COPY py/config.py py/db.py py/relay.py py/push.py py/reconcile.py py/inbox.py ./
 
 # --build-arg BUILD_TAG=GIT_SHA
 ARG BUILD_TAG=pybot

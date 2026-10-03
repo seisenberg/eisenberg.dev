@@ -279,10 +279,31 @@ class FakeS3:
     def __init__(self, bucket="mail-bucket", prefix="email-inbox/"):
         self.bucket, self.prefix = bucket, prefix
         self.objects: dict[str, bytes] = {}
+        self.modified: dict[str, datetime] = {}
         self.gets: list[str] = []
+        self.list_calls: list[dict] = []
+        self.page_size = 1000
 
-    def put(self, message_id: str, raw: bytes):
+    def put(self, message_id: str, raw: bytes, last_modified: datetime | None = None):
         self.objects[self.prefix + message_id] = raw
+        self.modified[self.prefix + message_id] = last_modified or FIXED_NOW
+
+    def put_key(self, key: str, raw: bytes, last_modified: datetime | None = None):
+        """An object at an arbitrary key (outside the prefix, or not a message id)."""
+        self.objects[key] = raw
+        self.modified[key] = last_modified or FIXED_NOW
+
+    def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):
+        assert Bucket == self.bucket
+        self.list_calls.append({"Prefix": Prefix, "ContinuationToken": ContinuationToken})
+        keys = sorted(k for k in self.objects if k.startswith(Prefix))
+        start = int(ContinuationToken) if ContinuationToken else 0
+        page = keys[start:start + self.page_size]
+        result = {"Contents": [{"Key": k, "LastModified": self.modified[k], "Size": len(self.objects[k])} for k in page],
+                  "IsTruncated": start + self.page_size < len(keys)}
+        if result["IsTruncated"]:
+            result["NextContinuationToken"] = str(start + self.page_size)
+        return result
 
     def get_object(self, Bucket, Key):
         assert Bucket == self.bucket
@@ -325,6 +346,10 @@ class FakeDB:
         self.mail_settings: dict | None = {"default_forward": True, "default_notify": True,
                                            "default_forward_style": "inline"}                 # the single row
         self.address_rules: dict[str, dict] = {}
+        self.blocked: dict[str, dict] = {}                # address -> {"count": n, "last": ...} for blocked rules
+        self.inbox_log: dict[str, str] = {}
+        self.users: dict[int, dict] = {1: {"role": "owner", "domains": None}}      # webmail_users
+        self.indexed_unread: list[list[str]] = []         # domains of each unread row in "messages"
         self.push_subscriptions: dict[str, dict] = {}
         self.fail = None  # callable(method_name) -> Exception | None
 
@@ -340,7 +365,7 @@ class FakeDB:
         if message_id in self.inbox:
             return False
         self.inbox[message_id] = dict(message_id=message_id, s3_key=s3_key, event=copy.deepcopy(event),
-                                      email_raw=email_raw, kind=kind, meta=copy.deepcopy(meta))
+                                      email_raw=email_raw, kind=kind, meta=copy.deepcopy(meta), processed_at=None)
         return True
 
     def get_inbox_meta(self, message_id):
@@ -402,15 +427,79 @@ class FakeDB:
         """What the webmail does when the owner edits an address."""
         self.address_rules[address] = {"forward": forward, "notify": notify, "forward_style": forward_style}
 
+    # -- blocked addresses, delivery log, reconcile --
+    def block(self, address):
+        """What the webmail does when the owner blocks an address (the rule row exists by then)."""
+        self.address_rules.setdefault(address, {"forward": True, "notify": True, "forward_style": "inline"})
+        self.blocked[address] = {"count": 0, "last": None}
+
+    def record_blocked(self, addresses):
+        self._maybe_fail("record_blocked")
+        hits = [a for a in addresses if a in self.blocked]
+        for address in hits:
+            self.blocked[address]["count"] += 1
+            self.blocked[address]["last"] = "now"
+        return hits
+
+    def log_outcome(self, message_id, outcome):
+        self._maybe_fail("log_outcome")
+        self.inbox_log[message_id] = outcome
+
+    def handled_message_ids(self, message_ids):
+        self._maybe_fail("handled_message_ids")
+        sources = {(r["meta"] or {}).get("relay_source_id") for r in self.inbox.values() if r["kind"] == "relay_out"}
+
+        def stored(m):          # an inbound row whose forward never finished does not count as handled
+            row = self.inbox.get(m)
+            meta = (row or {}).get("meta") or {}
+            return row is not None and not (row["kind"] == "inbound" and "notified" in meta and "forwarded" not in meta)
+
+        return {m for m in message_ids if m in self.inbox_log or stored(m) or m in sources}
+
     # -- web push --
-    def add_subscription(self, endpoint, p256dh="p256dh-key", auth="auth-secret", failure_count=0):
-        self.push_subscriptions[endpoint] = dict(endpoint=endpoint, p256dh=p256dh, auth=auth, user_id=1,
+    def add_subscription(self, endpoint, p256dh="p256dh-key", auth="auth-secret", failure_count=0, user_id=1):
+        self.push_subscriptions[endpoint] = dict(endpoint=endpoint, p256dh=p256dh, auth=auth, user_id=user_id,
                                                  last_success_at=None, failure_count=failure_count)
 
-    def list_push_subscriptions(self, limit=20):
+    def add_user(self, user_id, role="member", domains=None):
+        self.users[user_id] = {"role": role, "domains": domains}
+
+    def delete_orphan_push_subscriptions(self):
+        self._maybe_fail("delete_orphan_push_subscriptions")
+        orphans = [e for e, row in self.push_subscriptions.items() if row["user_id"] not in self.users]
+        for endpoint in orphans:
+            del self.push_subscriptions[endpoint]
+        return len(orphans)
+
+    def list_push_subscriptions(self, limit=40, per_user=5):
+        """Mirrors db.Database: the healthiest `per_user` of each user, owners first, `limit` overall."""
         self._maybe_fail("list_push_subscriptions")
-        rows = sorted(self.push_subscriptions.values(), key=lambda r: r["failure_count"])
-        return [dict(endpoint=r["endpoint"], p256dh=r["p256dh"], auth=r["auth"]) for r in rows[:limit]]
+        rows = sorted((r for r in self.push_subscriptions.values() if r["user_id"] in self.users),
+                      key=lambda r: r["failure_count"])
+        taken, kept = {}, []
+        for r in rows:
+            taken[r["user_id"]] = taken.get(r["user_id"], 0) + 1
+            if taken[r["user_id"]] <= per_user:
+                kept.append(r)
+        kept.sort(key=lambda r: (self.users[r["user_id"]]["role"] != "owner", r["failure_count"]))
+        return [dict(endpoint=r["endpoint"], p256dh=r["p256dh"], auth=r["auth"],
+                     role=self.users[r["user_id"]]["role"], domains=self.users[r["user_id"]]["domains"])
+                for r in kept[:limit]]
+
+    def count_unread(self, domains=None):
+        self._maybe_fail("count_unread")
+        wanted = None if domains is None else {d.lower() for d in domains}
+
+        def visible(message_domains):
+            return wanted is None or bool(wanted & {d.lower() for d in message_domains})
+
+        indexed = sum(1 for message_domains in self.indexed_unread if visible(message_domains))
+        pending = sum(
+            1 for row in self.inbox.values()
+            if row["kind"] == "inbound" and row["processed_at"] is None
+            and visible(r.rpartition("@")[2] for r in ((row["event"].get("receipt") or {}).get("recipients") or []))
+        )
+        return indexed + pending
 
     def push_succeeded(self, endpoint):
         self.push_subscriptions[endpoint].update(last_success_at="now", failure_count=0)
