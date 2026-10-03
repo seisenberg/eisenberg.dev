@@ -20,9 +20,9 @@ concurrency:
 
 jobs:
   node:
-    name: Node (typecheck, API tests, build)
+    name: Node (typecheck, API tests, build, browser tests)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17
@@ -48,6 +48,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Browser end-to-end tests (production build, desktop and phone)
+        run: npm run test:e2e
       - name: Known vulnerabilities in runtime dependencies
         run: npm audit --omit=dev --audit-level=high
 

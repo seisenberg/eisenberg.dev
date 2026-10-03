@@ -1,5 +1,10 @@
 {
   "extends": "./tsconfig.server.json",
-  "compilerOptions": { "noEmit": true, "rootDir": "." },
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    // the end-to-end tests contain functions that run inside the browser page
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+  },
   "include": ["src/server", "src/shared", "scripts", "test"]
 }

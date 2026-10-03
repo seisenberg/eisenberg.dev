@@ -34,7 +34,7 @@ Do this before anything else. The repository is public, so its settings are part
    - Deployment branches and tags: **Selected branches**, add `main`.
    - Optional but recommended: add yourself as a required reviewer, so every deploy waits for one click.
 5. **Settings, Rules, Rulesets.** New branch ruleset for `main`: restrict deletions, block force
-   pushes, require a pull request, and require these status checks: `Node (typecheck, API tests, build)`,
+   pushes, require a pull request, and require these status checks: `Node (typecheck, API tests, build, browser tests)`,
    `Python (inbox lambda)`, `Container images build`, `CloudFormation templates lint`.
    (The check names appear in the list after the first workflow run.)
 6. Deploy keys: the key that pushes from the development machine should be the only one with

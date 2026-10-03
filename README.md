@@ -155,6 +155,7 @@ instead of sending it, and keeps the file drop on disk. The sign-in for local de
 
 ```bash
 npm test            # API integration tests against a real PostgreSQL
+npm run test:e2e    # browser tests (desktop and phone) against the production build; needs Chrome
 npm run typecheck
 npm run build       # dist/ (UI) and build/ (server)
 cd py && uv venv .venv && uv pip install -r requirements-dev.txt && .venv/bin/python -m pytest -q
@@ -168,7 +169,7 @@ to confirm it works. After that, merging to `main` deploys.
 
 | Workflow | When | What |
 | --- | --- | --- |
-| [Tests](.github/workflows/test.yml) | pull requests, `main` | typecheck, API tests, Python tests, both image builds, template lint |
+| [Tests](.github/workflows/test.yml) | pull requests, `main` | typecheck, API tests, browser tests on desktop and phone, Python tests, both image builds, template lint |
 | [Deploy](.github/workflows/deploy.yml) | `main` | tests, then build, push, update both functions through OIDC |
 | [CodeQL](.github/workflows/codeql.yml) | pull requests, `main`, weekly | static analysis of TypeScript, Python and the workflows |
 | [Dependency review](.github/workflows/dependency-review.yml) | pull requests | blocks newly added vulnerable dependencies |
@@ -186,7 +187,7 @@ to confirm it works. After that, merging to `main` deploys.
 | `db/schema.sql` | the whole schema, idempotent |
 | `infra/` | `bootstrap.yml`, `app.yml` (CloudFormation), `db-host.sh` |
 | `scripts/` | `dev.ts`, `seed.ts`, `set-user.ts`, `apply-schema.ts`, `push-keys.ts` |
-| `test/` | API integration tests |
+| `test/` | API integration tests, `e2e/` browser tests |
 
 ## Data model
 

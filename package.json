@@ -11,12 +11,13 @@
     "build": "npm run build:ui && npm run build:server",
     "build:ui": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.scripts.json",
     "start": "node build/server/main.js",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts",
     "user:set": "tsx scripts/set-user.ts",
     "db:schema": "tsx scripts/apply-schema.ts",
-    "push:keys": "tsx scripts/push-keys.ts"
+    "push:keys": "tsx scripts/push-keys.ts",
+    "test:e2e": "npm run build:ui && tsx --test --test-timeout=120000 --test-concurrency=1 test/e2e/*.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1146.0",
@@ -53,6 +54,7 @@
     "dompurify": "^3.4.16",
     "embedded-postgres": "^18.4.0-beta.17",
     "lucide-react": "^1.51.0",
+    "puppeteer-core": "^25.12.0",
     "radix-ui": "^1.6.7",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

@@ -14,8 +14,8 @@ reporting for this repository (Security tab, "Report a vulnerability"), or write
 - No credentials, keys, account ids, hostnames of private infrastructure, or real mail. Runtime
   secrets live in AWS SSM Parameter Store and are read by the functions at start-up.
 - The sign-in in `scripts/seed.ts` exists only for the throwaway local database that
-  `npm run dev` creates. The production server refuses to start outside `NODE_ENV=production`,
-  and production has no seeded user.
+  `npm run dev` creates, and that dev server listens on loopback only. The production server
+  refuses to start outside `NODE_ENV=production`, and production has no seeded user.
 - Screenshots and test fixtures use invented people on reserved example domains.
 - CI runs with read-only permissions. Deployment uses short-lived AWS credentials obtained through
   GitHub OIDC, limited to the `main` branch and the `production` environment. Pull requests from

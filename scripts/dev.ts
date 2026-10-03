@@ -42,7 +42,9 @@ const app = createApp({
     }),
 });
 
-const server = app.listen(config.port, () => {
+// Loopback only: the development sign-in is published in the repository, so the dev server must
+// not be reachable from the network. (DEV_HOST=0.0.0.0 to try it from a phone on a network you trust.)
+const server = app.listen(config.port, process.env.DEV_HOST ?? '127.0.0.1', () => {
   console.log(`\n  eisenmail dev: http://localhost:${config.port}`);
   console.log('  sign in with the dev user defined in scripts/seed.ts (DEV_USER)\n');
 });

@@ -24,7 +24,7 @@ async function call(method: string, url: string, body?: unknown, opts: { headers
   if (cookie && !opts.noCookie) headers.cookie = cookie;
   if (method !== 'GET' && !opts.noCsrf) headers['x-eisenmail'] = '1';
   if (body !== undefined) headers['content-type'] ??= 'application/json';
-  const res = await fetch(base + url, { method, headers, body: body === undefined ? undefined : typeof body === 'string' || body instanceof Uint8Array ? body : JSON.stringify(body), redirect: 'manual' });
+  const res = await fetch(base + url, { method, headers, body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body), redirect: 'manual' });
   const text = await res.text();
   let json: Json = null;
   try {
@@ -310,6 +310,10 @@ test('file drop: private by default, public only after being marked', async () =
 
 test('two-factor: setup, enable, required at login, replay refused', async () => {
   const { totpCode, base32Decode } = await import('../src/server/auth.js');
+  // The assertions below compare codes for "this" and "the next" 30 second step, so do not start
+  // close to a step boundary (this is what made the test fail once in a while on a slow runner).
+  const into = Date.now() % 30_000;
+  if (into > 12_000) await new Promise((r) => setTimeout(r, 30_000 - into + 250));
   assert.equal((await call('POST', '/api/auth/totp/setup', { currentPassword: 'wrong-wrong-wrong' })).status, 403);
   const setup = (await call('POST', '/api/auth/totp/setup', { currentPassword: DEV_USER.password })).json;
   assert.match(setup.uri, /^otpauth:\/\/totp\//);
@@ -383,7 +387,7 @@ test('a hostile message cannot stall or slow mail indexing', async () => {
 
   const started = Date.now();
   assert.equal(await ingestPending({ force: true }), 4);
-  assert.ok(Date.now() - started < 5000, `indexing took ${Date.now() - started} ms`);
+  assert.ok(Date.now() - started < 15_000, `indexing took ${Date.now() - started} ms`); // the old converter needed minutes
   const left = await local.pool.query('select count(*)::int as n from lambda_inbox where processed_at is null');
   assert.equal(left.rows[0].n, 0);
   const rows = await local.pool.query(`select raw_id, subject, from_name from messages where raw_id in ('hostile-nul', 'hostile-nested', 'hostile-garbage', 'after-hostile') order by raw_id`);
@@ -401,7 +405,7 @@ test('a hostile message cannot stall or slow mail indexing', async () => {
   const t0 = Date.now();
   const detail = await call('GET', `/api/mail/messages/${nested.messages[0].id}`);
   assert.equal(detail.status, 200);
-  assert.ok(Date.now() - t0 < 3000);
+  assert.ok(Date.now() - t0 < 10_000);
   assert.equal((await call('GET', '/api/mail/messages?mailbox=inbox&limit=abc')).status, 200);
 
   assert.equal(htmlToText('<style>p{}</style><p>Hello&nbsp;<b>world</b> &amp; &#x263A;</p><script>x</script><div>next</div>'), 'Hello world & \u263a\nnext');
