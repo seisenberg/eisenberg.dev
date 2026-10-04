@@ -127,7 +127,7 @@ function MessageFull({ m, compact, showSubject }: { m: MessageDetail; compact: b
       </header>
       <div className="px-6 py-5 max-md:px-4 max-md:py-4">
         <AuthWarning m={m} />
-        {m.html ? <HtmlBody key={m.id} html={m.html} /> : <TextBody text={m.text || ""} />}
+        {m.html ? <HtmlBody key={m.id} html={m.html} messageId={m.id} /> : <TextBody text={m.text || ""} />}
         <Attachments m={m} />
       </div>
     </>

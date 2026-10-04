@@ -61,6 +61,12 @@ export interface Config {
     localDir: string;
     maxBytes: number;
   };
+  imageProxy: {
+    /** Tests only: lets the proxy fetch from loopback. Always false in production. */
+    allowPrivate: boolean;
+    maxBytes: number;
+    timeoutMs: number;
+  };
   push: {
     /** VAPID key pair (base64url). Generate with: npm run push:keys */
     publicKey: string | null;
@@ -126,6 +132,11 @@ function load(): Config {
       publicPrefix: env.PUBLIC_FILES_PREFIX ?? 'public/',
       localDir: env.FILES_LOCAL_DIR ?? '.data/files',
       maxBytes: int(env.FILES_MAX_BYTES, 2 * 1024 * 1024 * 1024),
+    },
+    imageProxy: {
+      allowPrivate: !production && env.IMAGE_PROXY_ALLOW_PRIVATE === '1',
+      maxBytes: 4_500_000, // Lambda cannot return more than 6 MB
+      timeoutMs: 8_000,
     },
     push: {
       publicKey: env.VAPID_PUBLIC_KEY?.trim() || null,

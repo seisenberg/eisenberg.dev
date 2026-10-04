@@ -300,3 +300,7 @@ create index if not exists inbox_log_at on inbox_log (at);
 
 -- Usernames are compared case-insensitively at sign-in, so they must be unique that way too.
 create unique index if not exists webmail_users_email_lower on webmail_users (lower(email));
+
+-- Key for signing image-proxy links (generated on first use). A link is only valid for the exact
+-- image address it was issued for.
+alter table mail_settings add column if not exists proxy_secret text;

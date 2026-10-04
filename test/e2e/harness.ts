@@ -7,7 +7,7 @@
 import { tmp } from '../env.js'; // must stay first: configures the server through the environment
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Server } from 'node:http';
+import http, { type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 import { startLocalDb, type LocalDb } from '../../scripts/local-db.js';
@@ -26,8 +26,12 @@ export interface E2E {
   base: string;
   browser: Browser;
   db: LocalDb;
+  /** A stand-in for a sender's image host, and every request it received. */
+  images: { origin: string; requests: { path: string; headers: Record<string, unknown> }[] };
   stop(): Promise<void>;
 }
+
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -43,6 +47,25 @@ export async function startE2E(): Promise<E2E> {
   const { serveStatic } = await import('../../src/server/static.js');
   setPool(db.pool);
   await seed(db.pool);
+
+  // A message whose pictures live on a local "sender" server. The proxy normally refuses loopback
+  // addresses; the test switches that one safeguard off (impossible in production).
+  const { default: config } = await import('../../src/server/config.js');
+  config.imageProxy.allowPrivate = true;
+  const requests: E2E['images']['requests'] = [];
+  const imageHost = http.createServer((req, res) => {
+    requests.push({ path: req.url ?? '', headers: req.headers });
+    res.writeHead(200, { 'content-type': 'image/png' });
+    res.end(PNG);
+  });
+  await new Promise<void>((resolve) => imageHost.listen(0, '127.0.0.1', resolve));
+  const imageOrigin = `http://127.0.0.1:${(imageHost.address() as AddressInfo).port}`;
+  const html = `<html><body><p>Our new catalogue is here.</p><img src="${imageOrigin}/banner.png" width="400" height="100" alt="Banner"><p>Thanks for reading.</p><img src="${imageOrigin}/open.gif?u=8842" width="1" height="1" alt=""></body></html>`;
+  await db.pool.query(`insert into lambda_inbox (message_id, created_at, event, email_raw) values ('e2e-images', now() + interval '1 minute', $1, $2)`, [
+    JSON.stringify({ mail: { timestamp: new Date(Date.now() + 60_000).toISOString() }, receipt: { recipients: ['catalogue@eisenberg.dev'], spfVerdict: { status: 'PASS' } } }),
+    Buffer.from(`From: Catalogue <news@catalogue.example>\r\nTo: catalogue@eisenberg.dev\r\nSubject: Pictures behind the proxy\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n${html}\r\n`),
+  ]);
+
   await ingestPending({ force: true });
   await seedState(db.pool);
 
@@ -56,10 +79,11 @@ export async function startE2E(): Promise<E2E> {
   } catch (err) {
     // never leave the database running behind a failed start
     server.close();
+    imageHost.close();
     await db.stop();
     throw err;
   }
-  return finish(base, browser, db, server);
+  return finish(base, browser, db, server, imageHost, { origin: imageOrigin, requests });
 }
 
 function launch(chrome: string): Promise<Browser> {
@@ -71,14 +95,16 @@ function launch(chrome: string): Promise<Browser> {
   });
 }
 
-function finish(base: string, browser: Browser, db: LocalDb, server: Server): E2E {
+function finish(base: string, browser: Browser, db: LocalDb, server: Server, imageHost: Server, images: E2E['images']): E2E {
   return {
     base,
     browser,
     db,
+    images,
     async stop() {
       await browser.close().catch(() => {});
       server.close();
+      imageHost.close();
       await db.stop();
       fs.rmSync(tmp, { recursive: true, force: true });
     },

@@ -36,34 +36,72 @@ test('sidebar: all inboxes, a folder per domain, an inbox per address', async ()
   for (const expected of ['All Inboxes', 'eisenberg.dev', 'harborlight.example', 'quartzworks.example', 'cool_stuff', 'github', 'Sent', 'Trash']) assert.ok(text.includes(expected), expected);
 });
 
-test('hostile mail is rendered inert and remote content is blocked until asked for', async () => {
-  await press(page, '[role=option]', 'Totally safe');
-  await page.waitForSelector('iframe[title="Message body"]');
-  await sleep(500);
-  const frame = await page.evaluate(() => {
+const frameInfo = () =>
+  page.evaluate(() => {
     const f = document.querySelector<HTMLIFrameElement>('iframe[title="Message body"]')!;
     const d = f.contentDocument!;
     return {
       sandbox: f.getAttribute('sandbox') ?? '',
+      srcdoc: f.srcdoc,
       active: d.querySelectorAll('script, form, input, iframe, object, embed, meta[http-equiv=refresh], [onerror], [onclick], [onload]').length,
       jsLinks: [...d.querySelectorAll('a')].filter((a) => (a.getAttribute('href') ?? '').trim().toLowerCase().startsWith('javascript:')).length,
-      remoteImages: [...d.querySelectorAll('img')].filter((i) => i.getAttribute('src')).length,
+      images: [...d.querySelectorAll('img')].map((i) => {
+        const r = i.getBoundingClientRect();
+        return { src: i.getAttribute('src') ?? '', blocked: i.hasAttribute('data-blocked'), width: Math.round(r.width), height: Math.round(r.height), loaded: i.complete && i.naturalWidth > 0 };
+      }),
       title: document.title,
     };
   });
+
+test('hostile mail is rendered inert', async () => {
+  await press(page, '[role=option]', 'Totally safe');
+  await page.waitForSelector('iframe[title="Message body"]');
+  await sleep(500);
+  const frame = await frameInfo();
   assert.ok(!frame.sandbox.includes('allow-scripts'));
   assert.equal(frame.active, 0);
   assert.equal(frame.jsLinks, 0);
-  assert.equal(frame.remoteImages, 0);
   assert.notEqual(frame.title, 'pwned');
-  assert.match(await bodyText(page), /Remote content was blocked/);
+  assert.ok(frame.images.every((i) => i.src === '' || i.src.startsWith('data:')), 'no image address of the sender is left in the document');
+  assert.ok(!/https?:\/\/evil\.example\/(pixel|bg|t)/.test(frame.srcdoc.replace(/\\3c [^>]*>/g, '')), 'no remote load survives');
+  assert.match(await bodyText(page), /Images are not shown/);
+});
 
-  // the choice to load remote content does not carry over to another message
+test('images stay hidden behind same-size placeholders until asked for, then load through the proxy', async () => {
+  await press(page, '[role=option]', 'Pictures behind the proxy');
+  await page.waitForSelector('iframe[title="Message body"]');
+  await sleep(600);
+  assert.match(await bodyText(page), /Images are not shown, so the sender cannot tell that you opened this message/);
+  let frame = await frameInfo();
+  const [banner, pixel] = frame.images;
+  assert.deepEqual([banner.blocked, banner.width, banner.height], [true, 400, 100], 'the placeholder keeps the picture\'s box');
+  assert.deepEqual([pixel.blocked, pixel.width, pixel.height], [true, 1, 1], 'a tracking pixel stays a pixel');
+  assert.ok(!frame.srcdoc.includes(e2e.images.origin), 'the sender\'s addresses are not in the document');
+  assert.equal(e2e.images.requests.length, 0, 'nothing was requested from the sender');
+
+  await press(page, 'button', 'Show images');
+  await page.waitForFunction(() => {
+    const d = document.querySelector<HTMLIFrameElement>('iframe[title="Message body"]')!.contentDocument!;
+    return d.images.length === 2 && [...d.images].every((i) => i.complete && i.naturalWidth > 0 && !i.hasAttribute('data-blocked'));
+  });
+  frame = await frameInfo();
+  assert.ok(frame.images.every((i) => i.src.startsWith('/api/mail/image/')), 'images come from this site, never from the sender directly');
+  assert.ok(!frame.srcdoc.includes(e2e.images.origin));
+  assert.equal(frame.images[0].width, 400); // (the stand-in picture is square, so only the width is meaningful here)
+  assert.match(await bodyText(page), /Images were fetched by this server/);
+
+  // what the sender's server saw: the proxy, not the reader's browser
+  assert.deepEqual(e2e.images.requests.map((r) => r.path).sort(), ['/banner.png', '/open.gif?u=8842']);
+  for (const r of e2e.images.requests) {
+    assert.equal(r.headers['user-agent'], 'Mozilla/5.0 (compatible; ImageProxy)');
+    for (const h of ['cookie', 'referer', 'origin', 'accept-language']) assert.equal(r.headers[h], undefined, h);
+  }
+
+  // the choice does not carry over: another message, and this one reopened, start hidden again
   await press(page, '[role=option]', 'has shipped');
-  await press(page, 'button', 'Load remote content');
-  assert.ok(await page.evaluate(() => document.querySelector<HTMLIFrameElement>('iframe[title="Message body"]')!.srcdoc.includes('img-src data: https:')));
-  await press(page, '[role=option]', 'Totally safe');
-  assert.ok(!(await page.evaluate(() => document.querySelector<HTMLIFrameElement>('iframe[title="Message body"]')!.srcdoc.includes('img-src data: https:'))));
+  await sleep(500);
+  assert.match(await bodyText(page), /Images are not shown/);
+  assert.ok((await frameInfo()).images.every((i) => i.src === '' || i.src.startsWith('data:')));
 });
 
 test('reply defaults to the receiving address; the sender address can be overridden', async () => {

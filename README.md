@@ -78,15 +78,22 @@ backups that can be restored anywhere.
 | --- | --- |
 | ![Compose with recipient suggestions](docs/screenshots/compose.png) | ![Image attachments previewed in place](docs/screenshots/attachments.png) |
 
-### Hostile mail stays harmless
+### Hostile mail stays harmless, and opening mail stays private
 
 Every byte of an inbound message belongs to the sender. HTML bodies are sanitised, rendered in a
 sandboxed frame that cannot run script, and cut off from the network by a Content-Security-Policy
-of their own. Remote images, the usual open-tracking pixel, stay blocked until asked for.
+of their own.
 
-| | |
-| --- | --- |
-| ![HTML mail with remote content blocked](docs/screenshots/mail-html.png) | ![A message full of scripts, forms and trackers, rendered inert](docs/screenshots/mail-hostile.png) |
+Remote images are how senders learn that a message was opened, when, and from where. They are
+never loaded by the browser. Each one is replaced by a placeholder of the same size, so the layout
+is intact, and a banner offers to show them. When asked, the **server** fetches them: the sender
+sees one request from an AWS address with a generic user agent, no cookies and no referrer. The
+proxy only fetches addresses that are really in the message, only public hosts, and only serves
+what is verifiably a raster image.
+
+| | | |
+| --- | --- | --- |
+| ![Images hidden behind same-size placeholders](docs/screenshots/mail-html.png) | ![A message full of scripts, forms and trackers, rendered inert](docs/screenshots/mail-hostile.png) | ![The same on a phone](docs/screenshots/phone-images-hidden.png) |
 
 ### Addresses: forwarding, notifications, notes and blocking
 
@@ -247,3 +254,7 @@ what lets the reconcile job tell "never processed" from "deliberately dropped".
 - Drafts do not keep attachments; add them when you send.
 - No offline mode: the installed app needs a connection.
 - A passkey is tied to the site's address. Add passkeys after the site is on its final domain.
+- Showing images still tells the sender that the message was opened and when, just not by whom or
+  from where. Images over 4.5 MB are not shown. A message with many images makes one request per
+  image, and a new AWS account allows only ten concurrent Lambda executions, so some may fail to
+  load until that quota is raised.

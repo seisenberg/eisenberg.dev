@@ -15,6 +15,7 @@ import * as push from './push.js';
 import * as settings from './settings.js';
 import * as users from './users.js';
 import * as passkeys from './passkeys.js';
+import { fetchImage, imageLinks } from './image-proxy.js';
 import { checkName, deleteMailObjects, DIRECT_DOWNLOAD_LIMIT, disposition, fileStore, localPath, localWrite, stageDownload, visibilityOf } from './files.js';
 import type { FileListing, MailboxView } from '../shared/api.js';
 
@@ -39,8 +40,8 @@ function contentSecurityPolicy(dev: boolean): string {
     dev ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
     // Inline styles are needed for rendered mail (which sits in a script-less sandboxed frame).
     "style-src 'self' 'unsafe-inline'",
-    // https: so that "load remote images" in a message can work; remote images are stripped unless asked for.
-    "img-src 'self' data: blob: https:",
+    // No remote image hosts at all: images in mail are only ever loaded through this server's proxy.
+    "img-src 'self' data: blob:",
     "font-src 'self' data:",
     `connect-src ${connect.join(' ')}`,
     "frame-src 'self'",
@@ -219,6 +220,19 @@ export function createApp(options: AppOptions = {}): Koa {
   });
   priv.get('/mail/messages/:id/attachments/:index', async (ctx) => {
     await sendDownload(ctx, await mail.getAttachment(viewer(ctx), ctx.params.id, ctx.params.index), one(ctx.query.inline) === '1');
+  });
+  // Remote images: links are issued per message, then each image is fetched by this server.
+  priv.post('/mail/messages/:id/image-links', async (ctx) => {
+    ctx.body = { links: await imageLinks(viewer(ctx), ctx.params.id, (ctx.request.body as { urls?: unknown })?.urls) };
+  });
+  priv.get('/mail/image/:sig/:url', async (ctx) => {
+    const image = await fetchImage(ctx.params.sig, ctx.params.url);
+    // the bytes come from a stranger: an image and nothing else, never a document in this origin
+    ctx.set('Content-Security-Policy', "sandbox; default-src 'none'");
+    ctx.set('Content-Disposition', 'inline');
+    ctx.set('Cache-Control', 'private, max-age=86400');
+    ctx.type = image.type;
+    ctx.body = image.body;
   });
   priv.get('/mail/messages/:id/raw', async (ctx) => {
     const raw = await mail.getRaw(viewer(ctx), ctx.params.id);

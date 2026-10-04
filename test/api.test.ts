@@ -883,3 +883,107 @@ test('review fixes: what a member can infer, and what a password change invalida
   assert.equal((await call('POST', '/api/auth/logout', { pushEndpoint: 'https://web.push.apple.com/owner-phone' })).status, 204);
   assert.equal((await local.pool.query('select 1 from push_subscriptions where user_id = $1', [me])).rowCount, 0);
 });
+
+test('image proxy: only public raster images, only for addresses that are in the message', async () => {
+  const http = await import('node:http');
+  const { default: config } = await import('../src/server/config.js');
+  const { isPublicAddress, fetchable, sniffImage } = await import('../src/server/image-proxy.js');
+
+  // ---- which addresses may ever be fetched
+  for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.9', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1', '::1', 'fe80::1', 'fd00::1', '::ffff:127.0.0.1', '::ffff:169.254.169.254', '64:ff9b::7f00:1', 'not-an-ip']) {
+    assert.equal(isPublicAddress(ip), false, ip);
+  }
+  for (const ip of ['93.184.216.34', '8.8.8.8', '2606:4700:4700::1111', '::ffff:8.8.8.8']) assert.equal(isPublicAddress(ip), true, ip);
+  for (const url of ['http://169.254.169.254/latest/meta-data/', 'http://127.0.0.1:54329/', 'https://[::1]/x.png', 'https://user:pw@cdn.example/x.png', 'https://cdn.example:8443/x.png', 'ftp://cdn.example/x.png', 'file:///etc/passwd', 'javascript:alert(1)', 'data:image/png;base64,AAAA', '', `https://cdn.example/${'a'.repeat(2100)}`]) {
+    assert.equal(fetchable(url), null, url);
+  }
+  assert.equal(fetchable('//cdn.example/a.png')!.toString(), 'https://cdn.example/a.png');
+  assert.equal(sniffImage(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')), null);
+  assert.equal(sniffImage(Buffer.from('<html><script>alert(1)</script></html>')), null);
+  assert.equal(sniffImage(Buffer.from('GIF89a........')), 'image/gif');
+
+  // the previous test signed out; sign in again (clearing the failures earlier tests left on purpose)
+  await local.pool.query('delete from webmail_login_attempts');
+  const again = await call('POST', '/api/auth/login', DEV_USER, { noCookie: true });
+  assert.equal(again.status, 200, again.text);
+  cookie = again.headers.getSetCookie().find((c) => c.startsWith('eisenmail_dev='))!.split(';')[0];
+
+  // ---- a server standing in for a sender's image host
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  const seen: { url: string; headers: Record<string, unknown> }[] = [];
+  const host = http.createServer((req, res) => {
+    seen.push({ url: req.url ?? '', headers: req.headers });
+    const send = (status: number, type: string, body: Buffer | string, extra: Record<string, string> = {}) => {
+      res.writeHead(status, { 'content-type': type, ...extra });
+      res.end(body);
+    };
+    const path = new URL(req.url ?? '/', 'http://sender.example').pathname;
+    if (path === '/pixel.png') send(200, 'image/png', png);
+    else if (path === '/moved') send(302, 'text/plain', '', { location: '/pixel.png' });
+    else if (path === '/loop') send(302, 'text/plain', '', { location: '/loop' });
+    else if (path === '/to-credentials') send(302, 'text/plain', '', { location: 'http://user:pw@127.0.0.1/pixel.png' });
+    else if (path === '/to-file') send(302, 'text/plain', '', { location: 'file:///etc/passwd' });
+    else if (path === '/fake.png') send(200, 'image/png', '<html><script>alert(document.domain)</script></html>');
+    else if (path === '/evil.svg') send(200, 'image/svg+xml', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    else if (path === '/huge.png') send(200, 'image/png', Buffer.concat([png, Buffer.alloc(config.imageProxy.maxBytes + 10)]));
+    else send(404, 'text/plain', 'no');
+  });
+  await new Promise<void>((r) => host.listen(0, '127.0.0.1', r));
+  after(() => void host.close()); // even if an assertion below throws
+  const origin = `http://127.0.0.1:${(host.address() as AddressInfo).port}`;
+  const paths = ['/pixel.png', '/moved', '/loop', '/to-credentials', '/to-file', '/fake.png', '/evil.svg', '/huge.png', '/missing.png'];
+  const body = `<html><body><p>pictures</p>${paths.map((p) => `<img src="${origin}${p}?a=1&amp;b=2" width="300" height="120">`).join('')}<img src="http://localhost/x.png"><img src="http://169.254.169.254/latest/meta-data/iam/"></body></html>`;
+  await deliver('proxy-1', 'pics@eisenberg.dev', { From: 'Shop <news@shop.example>', Subject: 'proxy pictures', 'Content-Type': 'text/html; charset=utf-8' }, body);
+  const message = await first('mailbox=inbox&q=proxy%20pictures');
+  const urlOf = (p: string) => `${origin}${p}?a=1&b=2`; // as the browser sees the attribute
+
+  try {
+    // ---- with the production safeguards: nothing on a private address gets a link, or is fetched
+    config.imageProxy.allowPrivate = false;
+    const locked = (await call('POST', `/api/mail/messages/${message.id}/image-links`, { urls: [...paths.map(urlOf), 'http://localhost/x.png', 'http://169.254.169.254/latest/meta-data/iam/'] })).json.links;
+    assert.deepEqual(Object.keys(locked), ['http://localhost/x.png'], 'IP literals and odd ports never get a link');
+    const blockedFetch = await call('GET', locked['http://localhost/x.png']);
+    assert.equal(blockedFetch.status, 502, 'a name that resolves to loopback is refused at connect time');
+    assert.equal(seen.length, 0, 'nothing was requested');
+
+    // ---- with loopback allowed (tests only), the proxy itself can be exercised
+    config.imageProxy.allowPrivate = true;
+    const res = await call('POST', `/api/mail/messages/${message.id}/image-links`, { urls: [...paths.map(urlOf), 'https://elsewhere.example/not-in-the-message.png'] });
+    const links: Record<string, string> = res.json.links;
+    assert.equal(links['https://elsewhere.example/not-in-the-message.png'], undefined, 'only addresses that are in the message');
+    assert.equal(Object.keys(links).length, paths.length);
+    assert.match(links[urlOf('/pixel.png')], /^\/api\/mail\/image\/[A-Za-z0-9_-]{24}\/[A-Za-z0-9_-]+$/);
+
+    const ok = await call('GET', links[urlOf('/pixel.png')]);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers.get('content-type'), 'image/png');
+    assert.match(ok.headers.get('content-security-policy') ?? '', /sandbox/);
+    assert.equal(ok.headers.get('x-content-type-options'), 'nosniff');
+    // what the sender's server learned: nothing about the reader
+    const hit = seen.at(-1)!;
+    assert.equal(hit.url, '/pixel.png?a=1&b=2');
+    assert.equal(hit.headers['user-agent'], 'Mozilla/5.0 (compatible; ImageProxy)');
+    for (const h of ['cookie', 'referer', 'origin', 'accept-language', 'x-forwarded-for', 'authorization']) assert.equal(hit.headers[h], undefined, h);
+
+    assert.equal((await call('GET', links[urlOf('/moved')])).status, 200, 'redirects are followed');
+    assert.equal((await call('GET', links[urlOf('/loop')])).status, 502, 'but not forever');
+    assert.equal((await call('GET', links[urlOf('/to-credentials')])).status, 502);
+    assert.equal((await call('GET', links[urlOf('/to-file')])).status, 502);
+    assert.equal((await call('GET', links[urlOf('/fake.png')])).status, 415, 'html labelled as png is not served');
+    assert.equal((await call('GET', links[urlOf('/evil.svg')])).status, 415, 'svg is not served');
+    assert.equal((await call('GET', links[urlOf('/huge.png')])).status, 413);
+    assert.equal((await call('GET', links[urlOf('/missing.png')])).status, 502);
+
+    // a link cannot be altered to point somewhere else, and needs a session
+    const [, , , , sig, encoded] = links[urlOf('/pixel.png')].split('/');
+    const other = Buffer.from(`${origin}/fake.png`).toString('base64url');
+    assert.equal((await call('GET', `/api/mail/image/${sig}/${other}`)).status, 404);
+    assert.equal((await call('GET', `/api/mail/image/${'A'.repeat(24)}/${encoded}`)).status, 404);
+    assert.equal((await call('GET', links[urlOf('/pixel.png')], undefined, { noCookie: true })).status, 401);
+    assert.equal((await call('POST', '/api/mail/messages/999999999/image-links', { urls: [urlOf('/pixel.png')] })).status, 404);
+    assert.equal((await call('POST', `/api/mail/messages/${message.id}/image-links`, { urls: 'nope' })).status, 400);
+  } finally {
+    config.imageProxy.allowPrivate = false;
+    host.close();
+  }
+});

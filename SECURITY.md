@@ -50,13 +50,30 @@ reporting for this repository (Security tab, "Report a vulnerability"), or write
   required, and the per-address limits still apply.
 
 ### Hostile email content
-Inbound mail is attacker-controlled in every byte. The reading pane uses three independent layers,
-so a failure of any one is not enough:
+Inbound mail is attacker-controlled in every byte. The reading pane uses independent layers, so a
+failure of any one is not enough:
 1. DOMPurify removes scripts, event handlers, forms, frames, embeds, SVG and `javascript:` links.
 2. The result renders in a sandboxed `<iframe>` that does **not** have `allow-scripts`. Nothing in
    a message can execute, whatever the sanitiser missed.
-3. A Content-Security-Policy inside the frame blocks every network load. Remote images (the usual
-   open-tracking pixel) stay blocked until you click "Load remote content" for that message.
+3. A Content-Security-Policy inside the frame, and the site's own, allow images from this site and
+   nothing else. The browser cannot contact a sender's server at all.
+
+### Remote images and the image proxy
+Remote images are replaced by same-size placeholders. Loading them reveals that the message was
+opened, so it happens only on request, and then through the server: the sender sees an AWS
+address and a generic user agent, never the reader's IP address, browser, cookies or referrer.
+
+A proxy that fetches addresses chosen by strangers must not be usable against internal services.
+- A link is issued only for an address that occurs in a message the viewer can open, and it is
+  signed. The proxy route cannot be pointed at anything else.
+- Only `http` and `https` on their standard ports. No credentials, no literal IP addresses.
+- The host name is resolved by the server. Every address it resolves to must be public: loopback,
+  private, link-local (cloud metadata), carrier NAT, multicast and reserved ranges are refused. The
+  connection is pinned to the address that was checked, so DNS cannot change the answer in between.
+- Redirects are followed by hand, at most four, each checked the same way.
+- The response must be a raster image, judged from its first bytes and not from the header the
+  remote server sends. SVG and anything else is refused. It is size capped and served with a
+  `sandbox` policy and `nosniff`, so it can never act as a document on this site.
 
 Plain-text bodies, subjects and sender names are rendered as text, never as HTML. Attachments are
 always served as downloads with `Content-Disposition: attachment`, `nosniff` and a `sandbox` CSP.
