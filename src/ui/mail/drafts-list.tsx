@@ -24,7 +24,7 @@ export function DraftsList({ onOpen, mobile }: { onOpen: (d: Draft) => void; mob
     void qc.invalidateQueries({ queryKey: ["drafts"] });
   };
   return (
-    <div role="list" aria-label="Drafts" className={cn("scroll-thin min-h-0 flex-1 overflow-y-auto", mobile ? "pb-safe" : "py-1.5")}>
+    <div role="list" aria-label="Drafts" className={cn("scroll-thin min-h-0 flex-1 overflow-y-auto", mobile ? "" : "py-1.5")}>
       {drafts.data.map((d, i) => (
         <div key={d.id} role="listitem">
           {i > 0 && <div className={cn("bg-border h-px", mobile ? "ml-9" : "mr-5 ml-7")} />}

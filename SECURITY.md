@@ -29,7 +29,23 @@ reporting for this repository (Security tab, "Report a vulnerability"), or write
   password, or running `user:set` signs out every other device.
 - **Passkeys** (WebAuthn) sign in on their own, with user verification required. Challenges are
   single-use database rows with a five minute life. The sign-in request offers no credential list,
-  so it reveals nothing about which accounts exist. Adding a passkey needs the password again.
+  so it reveals nothing about which accounts exist. Adding a passkey needs the password again,
+  with one exception: a session that was created by a password sign-in less than ten minutes ago
+  may add one directly (the offer shown after sign-in). A session created by a passkey never
+  counts as fresh.
+- **Sign-in code by email.** An account with a verification mailbox and no authenticator app must
+  also enter a six digit code that is mailed after the password was accepted. Codes are stored as
+  hashes, live ten minutes, are single use, and die after five wrong tries. Only the newest code
+  is valid. At most one code a minute and six an hour are sent, and none unless the password was
+  right, so someone without the password cannot fill the mailbox. Wrong codes count toward the login throttle. The
+  mailbox must be outside the domains this system receives for, and it is confirmed with a code
+  before the check is switched on. The response shows the address masked.
+- **Authenticator vault** (the Codes page). Secrets of other sites' two-factor are encrypted with
+  AES-256-GCM under a key that is not in the database (SSM parameter, readable by the web
+  function's role only and explicitly denied to the inbox function). Each record is bound to its
+  owner as authenticated data, so a row copied to another user does not decrypt. The API returns
+  the current and next code and never the secret; there is no export. Database dumps and
+  snapshots therefore do not contain usable secrets.
 - **Members** are separate sign-ins limited to chosen domains. The restriction is applied inside
   every mail query, not in the interface: a message the member may not see answers "not found"
   whether it is read, changed, downloaded or replied to. Members cannot use the file drop, manage
@@ -184,6 +200,28 @@ tests:
 | Low | The conversation size shown to a member counted messages they could not see. | Counted per viewer. |
 | Low | A member with many devices could crowd the owner out of notifications. | At most five devices per user, owners first. |
 | Low | A member could block an address, which outlived the member. | Blocking is owner-only. Rules are capped per domain. |
+
+### Third review: authenticator vault, sign-in code by email, the passkey offer
+
+The reviewer confirmed that a wrong password looks the same whether or not the account uses the
+email check, that no code is mailed without the right password, that codes are bound to the user
+and single use under races, that the vault uses a fresh nonce per record with the owner bound in,
+and that secrets appear in no response or log. It found seven gaps, all fixed with tests:
+
+| Severity | Finding | Fix |
+| --- | --- | --- |
+| Medium | After asking for a second code, wrong guesses were counted on the newest code only, while an older live code could still be matched: the five-try limit could be sidestepped. | Sending a code ends every earlier one. Counting the try and comparing the code happen in one statement, and a used-up code is never compared again. |
+| Medium | A Google Authenticator export with a negative batch number was rejected as damaged. | The reader accepts the full ten-byte number form. |
+| Low | The mailbox for sign-in codes survived a password reset, including one somebody else had planted. | A reset from the command line or by the owner switches the email check off unless a mailbox is given again. A password change names the mailbox the codes go to. |
+| Low | Correcting a mistyped mailbox within a minute reported "sent" although nothing was sent, and the first address could still be confirmed. | The answer is "wait a minute", and the earlier code is dead once a new one is sent. |
+| Low | The command-line `--email` was not validated. | Same rule as in the settings. |
+| Low | Removing a member left their encrypted authenticator entries and pending codes behind. | Removed with the member. |
+| Low | A malformed setup link produced a server error instead of a refusal. | Refused as invalid. |
+
+Two things are by design. A session can add a passkey without the password for ten minutes after
+a password sign-in, so a session stolen in that window could add one; passkeys are listed in the
+settings and removed by a password change. And the owner operates the system and holds the vault
+key, so a member's authenticator entries are not protected from the owner.
 
 ## AWS settings the code relies on
 

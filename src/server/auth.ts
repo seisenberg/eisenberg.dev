@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import type { Context, Next } from 'koa';
+import { base32Decode, base32Encode, totpCode } from './otp.js';
 import config from './config.js';
 import { query, tx, type Queryable } from './db.js';
-import type { Viewer } from './mail.js';
+import { HttpError, type Viewer } from './mail.js';
 import type { SessionInfo, SessionUser } from '../shared/api.js';
 
 // ------------------------------------------------------------------------------------------------
@@ -50,48 +51,7 @@ const getDummyHash = () => (dummyHash ??= hashPassword(crypto.randomBytes(24).to
 // TOTP (RFC 6238, SHA-1, 6 digits, 30 s) with replay protection.
 // ------------------------------------------------------------------------------------------------
 
-const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-
-export function base32Encode(buf: Buffer): string {
-  let bits = 0;
-  let value = 0;
-  let out = '';
-  for (const byte of buf) {
-    value = (value << 8) | byte;
-    bits += 8;
-    while (bits >= 5) {
-      out += B32[(value >>> (bits - 5)) & 31];
-      bits -= 5;
-    }
-  }
-  if (bits > 0) out += B32[(value << (5 - bits)) & 31];
-  return out;
-}
-
-export function base32Decode(text: string): Buffer {
-  const clean = text.toUpperCase().replace(/[^A-Z2-7]/g, '');
-  const out: number[] = [];
-  let bits = 0;
-  let value = 0;
-  for (const ch of clean) {
-    value = (value << 5) | B32.indexOf(ch);
-    bits += 5;
-    if (bits >= 8) {
-      out.push((value >>> (bits - 8)) & 255);
-      bits -= 8;
-    }
-  }
-  return Buffer.from(out);
-}
-
-export function totpCode(secret: Buffer, step: number): string {
-  const counter = Buffer.alloc(8);
-  counter.writeBigUInt64BE(BigInt(step));
-  const mac = crypto.createHmac('sha1', secret).update(counter).digest();
-  const offset = mac[mac.length - 1] & 15;
-  const bin = ((mac[offset] & 0x7f) << 24) | (mac[offset + 1] << 16) | (mac[offset + 2] << 8) | mac[offset + 3];
-  return String(bin % 1_000_000).padStart(6, '0');
-}
+export { base32Decode, base32Encode, totpCode } from './otp.js';
 
 /** Returns the matched time step, or null. Steps at or before lastStep are rejected (no replays). */
 export function verifyTotp(secretB32: string, code: string, lastStep: number | null, now = Date.now()): number | null {
@@ -171,6 +131,8 @@ interface SessionRow {
   totp_secret: string | null;
   role: 'owner' | 'member';
   domains: string[] | null;
+  verify_email: string | null;
+  fresh: boolean;
   stale: boolean;
 }
 
@@ -181,6 +143,10 @@ export interface AuthState {
   role: 'owner' | 'member';
   /** null for an owner (all domains); the allowed domains for a member */
   domains: string[] | null;
+  /** where sign-in codes are emailed, when the email check is on */
+  verifyEmail: string | null;
+  /** signed in with the password (and second step) within the last ten minutes */
+  fresh: boolean;
   tokenHash: Buffer;
 }
 
@@ -190,20 +156,28 @@ export function viewerOf(ctx: Context): Viewer {
   return { userId: a.userId, owner: a.role === 'owner', domains: a.role === 'owner' ? null : (a.domains ?? []) };
 }
 
-const sessionUser = (a: Pick<AuthState, 'username' | 'totpEnabled' | 'role' | 'domains'>): SessionUser => ({
+/** "s•••@outlook.com": enough to recognise the mailbox, not enough to learn it. */
+export function maskEmail(email: string): string {
+  const at = email.lastIndexOf('@');
+  return at < 1 ? '•••' : `${email[0]}•••${email.slice(at)}`;
+}
+
+export const sessionUser = (a: Pick<AuthState, 'username' | 'totpEnabled' | 'role' | 'domains' | 'verifyEmail'> & { fresh?: boolean }): SessionUser => ({
   username: a.username,
   totpEnabled: a.totpEnabled,
   role: a.role,
   domains: a.role === 'owner' ? null : (a.domains ?? []),
+  emailCheck: a.verifyEmail ? maskEmail(a.verifyEmail) : null,
+  fresh: a.fresh === true,
 });
 
-async function createSession(ctx: Context, userId: number): Promise<void> {
+async function createSession(ctx: Context, userId: number, method: 'password' | 'passkey' = 'password'): Promise<void> {
   const token = crypto.randomBytes(32).toString('base64url');
   const ttl = config.session.ttlHours * 3600;
   await query(
-    `insert into webmail_sessions (token_hash, user_id, expires_at, ip, user_agent)
-     values ($1, $2, now() + make_interval(secs => $3), $4, $5)`,
-    [hashToken(token), userId, ttl, clientIp(ctx), ctx.get('user-agent').slice(0, 300) || null],
+    `insert into webmail_sessions (token_hash, user_id, expires_at, ip, user_agent, method)
+     values ($1, $2, now() + make_interval(secs => $3), $4, $5, $6)`,
+    [hashToken(token), userId, ttl, clientIp(ctx), ctx.get('user-agent').slice(0, 300) || null, method],
   );
   ctx.append('Set-Cookie', sessionCookie(token, ttl));
 }
@@ -214,7 +188,8 @@ async function loadSession(ctx: Context): Promise<AuthState | null> {
   const tokenHash = hashToken(token);
   const ttl = config.session.ttlHours * 3600;
   const res = await query<SessionRow & { renew: boolean }>(
-    `select s.token_hash, s.user_id, u.email as username, u.totp_secret, u.role, u.domains,
+    `select s.token_hash, s.user_id, u.email as username, u.totp_secret, u.role, u.domains, u.verify_email,
+            (s.method = 'password' and s.created_at > now() - interval '10 minutes') as fresh,
             s.last_seen_at < now() - interval '1 minute' as stale,
             s.expires_at < now() + make_interval(secs => $2) - interval '1 day' as renew
        from webmail_sessions s join webmail_users u on u.id = s.user_id
@@ -231,7 +206,7 @@ async function loadSession(ctx: Context): Promise<AuthState | null> {
   } else if (row.stale) {
     await query('update webmail_sessions set last_seen_at = now() where token_hash = $1', [tokenHash]);
   }
-  return { userId: row.user_id, username: row.username, totpEnabled: !!row.totp_secret, role: row.role, domains: row.domains, tokenHash };
+  return { userId: row.user_id, username: row.username, totpEnabled: !!row.totp_secret, role: row.role, domains: row.domains, verifyEmail: row.verify_email, fresh: row.fresh, tokenHash };
 }
 
 /** User management, the file drop and global mail settings belong to owners. */
@@ -245,9 +220,9 @@ export async function requireOwner(ctx: Context, next: Next): Promise<void> {
 }
 
 /** Used by every way of signing in (password, passkey): new session, and remember this browser. */
-export async function startSession(ctx: Context, userId: number, username: string): Promise<void> {
+export async function startSession(ctx: Context, userId: number, username: string, method: 'password' | 'passkey'): Promise<void> {
   const known = await isKnownDevice(ctx, username);
-  await createSession(ctx, userId);
+  await createSession(ctx, userId, method);
   if (!known) await rememberDevice(ctx, userId);
 }
 
@@ -384,8 +359,8 @@ export async function login(ctx: Context): Promise<void> {
     return fail(ctx, 429, 'Too many failed sign-in attempts. Try again later.', 'throttled');
   }
 
-  const res = await query<{ id: number; passhash: string | null; totp_secret: string | null; totp_last_step: string | null; role: 'owner' | 'member'; domains: string[] | null }>(
-    'select id, passhash, totp_secret, totp_last_step, role, domains from webmail_users where lower(email) = $1',
+  const res = await query<{ id: number; passhash: string | null; totp_secret: string | null; totp_last_step: string | null; role: 'owner' | 'member'; domains: string[] | null; verify_email: string | null }>(
+    'select id, passhash, totp_secret, totp_last_step, role, domains, verify_email from webmail_users where lower(email) = $1',
     [username],
   );
   const user = res.rows[0];
@@ -405,12 +380,122 @@ export async function login(ctx: Context): Promise<void> {
       ((await query('update webmail_users set totp_last_step = $2 where id = $1 and (totp_last_step is null or totp_last_step < $2)', [user.id, step])).rowCount ?? 0) > 0;
     // A recovery code stands in for the authenticator, once.
     if (!claimed && !(await useRecoveryCode(user.id, code))) return fail(ctx, 401, 'That code is not valid', 'bad_totp');
+  } else if (user.verify_email) {
+    // No authenticator: the second step is a code sent to a mailbox outside this system.
+    if (!code) {
+      await query('delete from webmail_login_attempts where id = $1', [attempt]); // right password, not a failed guess
+      const sent = await issueEmailCode(user.id, user.verify_email, 'login', ip);
+      if (sent === 'limited') return fail(ctx, 429, 'Too many codes were requested. Try again in an hour, or sign in with a passkey.', 'throttled');
+      if (sent === 'wait') return fail(ctx, 429, 'A code was requested a moment ago. Try again in a minute.', 'throttled');
+      return fail(ctx, 401, `Enter the 6 digit code sent to ${maskEmail(user.verify_email)}`, 'email_code_required');
+    }
+    if (!(await checkEmailCode(user.id, 'login', code))) return fail(ctx, 401, 'That code is not valid or has expired', 'bad_email_code');
   }
 
   await attemptSucceeded(attempt, username, ip);
   await createSession(ctx, user.id);
   if (!knownDevice) await rememberDevice(ctx, user.id);
-  ctx.body = sessionUser({ username, totpEnabled: !!user.totp_secret, role: user.role, domains: user.domains });
+  ctx.body = sessionUser({ username, totpEnabled: !!user.totp_secret, role: user.role, domains: user.domains, verifyEmail: user.verify_email, fresh: true });
+}
+
+// ------------------------------------------------------------------------------------------------
+// Sign-in check by email: a six digit code sent to a mailbox outside this system
+// ------------------------------------------------------------------------------------------------
+
+const EMAIL_CODE_MINUTES = 10;
+const EMAIL_CODE_TRIES = 5;
+
+/** The mailbox must not be one this system receives for: the code would arrive in the webmail being signed in to. */
+export function outsideAddress(input: unknown): string {
+  const email = String(input ?? '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(400, 'That is not a valid email address');
+  const domain = email.slice(email.lastIndexOf('@') + 1);
+  if (config.mail.domains.includes(domain)) throw new HttpError(400, `Use a mailbox outside this system. Mail for ${domain} is delivered here, so the code would be locked in with you.`);
+  return email;
+}
+
+async function issueEmailCode(userId: number, email: string, purpose: 'login' | 'set_email', ip: string): Promise<'sent' | 'recent' | 'wait' | 'limited'> {
+  const recent = await query<{ last_minute: number; same: number; last_hour: number }>(
+    `select count(*) filter (where created_at > now() - interval '1 minute')::int as last_minute,
+            count(*) filter (where created_at > now() - interval '1 minute' and purpose = $2 and email = $3 and expires_at > now() and attempts < $4)::int as same,
+            count(*)::int as last_hour
+       from login_challenges where user_id = $1 and created_at > now() - interval '1 hour'`,
+    [userId, purpose, email, EMAIL_CODE_TRIES],
+  );
+  // The same code was sent moments ago and is still good: do not send another. A code of another
+  // kind, or to another address, within the minute: nothing usable is out there, so say "wait".
+  if (recent.rows[0].last_minute > 0) return recent.rows[0].same > 0 ? 'recent' : 'wait';
+  if (recent.rows[0].last_hour >= 6) return 'limited';
+  // Only the newest code counts. Earlier ones end here (the rows stay for the hourly limit), so
+  // the five tries cannot be multiplied by asking for more codes.
+  await query('update login_challenges set expires_at = now() where user_id = $1 and expires_at > now()', [userId]);
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+  await query(`delete from login_challenges where expires_at < now() - interval '1 hour'`);
+  await query(
+    `insert into login_challenges (id, user_id, purpose, email, code_hash, expires_at) values ($1, $2, $3, $4, $5, now() + make_interval(mins => $6))`,
+    [crypto.randomUUID(), userId, purpose, email, hashToken(code), EMAIL_CODE_MINUTES],
+  );
+  const { sendSystemMail } = await import('./send.js');
+  await sendSystemMail(
+    email,
+    purpose === 'login' ? 'Your sign-in code' : 'Confirm this address for sign-in codes',
+    [
+      purpose === 'login' ? 'Someone, hopefully you, is signing in and has entered the correct password.' : 'This address was entered as the place to send sign-in codes.',
+      '',
+      `Code: ${code}`,
+      '',
+      `It works for ${EMAIL_CODE_MINUTES} minutes. The request came from ${ip}.`,
+      purpose === 'login' ? 'If this was not you, your password is known to someone else: change it.' : 'If this was not you, ignore this message.',
+    ].join('\n'),
+  );
+  return 'sent';
+}
+
+/** Checks a code against the newest live challenge. A challenge dies after a few wrong tries. Returns the address it was sent to. */
+async function checkEmailCode(userId: number, purpose: 'login' | 'set_email', input: string): Promise<string | null> {
+  const code = input.replace(/\D/g, '');
+  if (code.length !== 6) return null;
+  // One statement counts the try and compares, so parallel guesses cannot outrun the limit, and
+  // a challenge that has used up its tries is never compared again.
+  const tried = await query<{ id: string; ok: boolean }>(
+    `update login_challenges set attempts = attempts + 1
+      where id = (select id from login_challenges where user_id = $1 and purpose = $2 and expires_at > now() order by created_at desc limit 1)
+        and attempts < $4
+      returning id, (code_hash = $3) as ok`,
+    [userId, purpose, hashToken(code), EMAIL_CODE_TRIES],
+  );
+  if (!tried.rows[0]?.ok) return null;
+  // single use, even when two requests race: whoever deletes the row wins
+  const hit = await query<{ email: string }>('delete from login_challenges where id = $1 returning email', [tried.rows[0].id]);
+  return hit.rows[0]?.email ?? null;
+}
+
+/** Settings: choose the mailbox. A code is sent there and must be typed back before it takes effect. */
+export async function emailCheckStart(ctx: Context): Promise<void> {
+  const auth = ctx.state.auth as AuthState;
+  const body = (ctx.request.body ?? {}) as Record<string, unknown>;
+  const email = outsideAddress(body.email);
+  if (!(await confirmPassword(ctx, body.currentPassword))) return;
+  const sent = await issueEmailCode(auth.userId, email, 'set_email', clientIp(ctx));
+  if (sent === 'limited') return fail(ctx, 429, 'Too many codes were requested. Try again in an hour.', 'throttled');
+  if (sent === 'wait') return fail(ctx, 429, 'A code was requested a moment ago. Try again in a minute.', 'throttled');
+  ctx.body = { sentTo: maskEmail(email) };
+}
+
+export async function emailCheckConfirm(ctx: Context): Promise<void> {
+  const auth = ctx.state.auth as AuthState;
+  const email = await checkEmailCode(auth.userId, 'set_email', String((ctx.request.body as { code?: unknown })?.code ?? ''));
+  if (!email) return fail(ctx, 400, 'That code is not valid or has expired', 'bad_email_code');
+  await query('update webmail_users set verify_email = $2 where id = $1', [auth.userId, email]);
+  ctx.body = { emailCheck: maskEmail(email) };
+}
+
+export async function emailCheckDisable(ctx: Context): Promise<void> {
+  const auth = ctx.state.auth as AuthState;
+  if (!(await confirmPassword(ctx, (ctx.request.body as { currentPassword?: unknown })?.currentPassword))) return;
+  await query('update webmail_users set verify_email = null where id = $1', [auth.userId]);
+  await query('delete from login_challenges where user_id = $1', [auth.userId]);
+  ctx.status = 204;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -520,7 +605,10 @@ export async function changePassword(ctx: Context): Promise<void> {
   await query('delete from webmail_devices where user_id = $1', [auth.userId]);
   await query('delete from webauthn_credentials where user_id = $1', [auth.userId]);
   await query('delete from push_subscriptions where user_id = $1', [auth.userId]);
-  ctx.status = 204;
+  await query('delete from login_challenges where user_id = $1', [auth.userId]);
+  // The mailbox for sign-in codes stays (removing it would weaken the account), but the answer
+  // names it, so an address somebody else planted does not go unnoticed.
+  ctx.body = { emailCheck: auth.verifyEmail ? maskEmail(auth.verifyEmail) : null };
 }
 
 export async function totpSetup(ctx: Context): Promise<void> {

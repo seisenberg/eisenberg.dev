@@ -177,11 +177,26 @@ to its endpoint and keep `DbSslMode=verify-full`. For your own machine behind an
 "Running the database on your own hardware" in [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md).
 In both cases you store `/eisenmail/db_password` yourself.
 
-## 6. Store the one secret you create yourself (optional)
+## 6. Store the two secrets you create yourself
 
-The database password and the tunnel key are already in SSM Parameter Store. The only secret left
-is the key for push notifications. Skip this step if you do not want notifications on your phone.
-You can come back to it later.
+The database password and the tunnel key are already in SSM Parameter Store. Two secrets are left.
+
+**The vault key.** It encrypts the accounts you keep on the Codes page (the built-in authenticator).
+Without it that page is switched off; everything else works.
+
+```bash
+aws ssm put-parameter --name /eisenmail/vault_key --type SecureString --value "$(openssl rand -base64 32)"
+```
+
+The key exists only in that parameter. A database backup does not contain it, and the codes cannot
+be read without it. Save a copy in your password manager now:
+
+```bash
+aws ssm get-parameter --name /eisenmail/vault_key --with-decryption --query Parameter.Value --output text
+```
+
+**The push key (optional).** Skip this if you do not want notifications on your phone. You can come
+back to it later.
 
 ```bash
 npm ci
@@ -259,17 +274,36 @@ Leave it running. In another terminal, in the repository (after `npm ci`):
 ```bash
 POSTGRES_DB_PASSWORD="$(aws ssm get-parameter --name /eisenmail/db_password --with-decryption --query Parameter.Value --output text)" \
 POSTGRES_DB_HOST=127.0.0.1 POSTGRES_DB_PORT=15432 POSTGRES_DB_USER=eisenmail POSTGRES_DB_NAME=emails \
-npm run user:set -- <username>
+npm run user:set -- <username> --email <your private mailbox>
 ```
 
 The database password goes from SSM straight into the environment of that one command. It is not
 shown and not stored. The command asks for your new sign-in password twice (12 characters or
 more). Then stop the first terminal with Ctrl-C.
 
-Open `SiteUrl`, go to `/mail` and sign in. Then do two things right away:
+`--email` switches on the sign-in check from the first sign-in: after the password, a six digit
+code is sent to that mailbox and has to be typed in. Use a mailbox outside this system (your
+Outlook address), so that the code does not land in the webmail you are trying to open. Two things
+to know:
 
-1. Account menu, **Security settings**: switch on two-factor authentication.
-2. Account menu, **Mail settings**: create a delivery rule for the address
+- The code is sent through SES. Until step 9 is done (domain verified, and either production
+  access granted or that mailbox verified as a recipient), the mail cannot be delivered and you
+  could not sign in. If you want to look around before step 9, leave `--email` out now and switch
+  the check on later under **Security and people**, which confirms the mailbox with a test code.
+- The address is stored in the database only. Do not put it in the repository.
+
+Open `SiteUrl`, go to `/mail` and sign in. Then do three things right away:
+
+1. Accept the offer to **add a passkey** that appears after the first sign-in (or later: account
+   menu, **Security and people**). From then on that device signs in with Touch ID, Face ID or
+   its PIN, without password or code. Do this again after step 10: a passkey belongs to the
+   site's address, so one made on the temporary address stops working when the domain moves.
+   Repeat on each device you use.
+2. Account menu, **Security and people**: save the recovery route you prefer. Either keep the
+   email check, or switch on an authenticator app with recovery codes, which then replaces the
+   emailed code. Do not keep that authenticator entry only on this site's own Codes page: you
+   would need to be signed in to read it.
+3. Account menu, **Mail settings**: create a delivery rule for the address
    `dmarc@<your domain>` with **Forward** off and **Notify** off (one rule per domain).
    Step 9 publishes that address as the place where other mail providers send their daily DMARC
    reports. The rule keeps those machine-made reports in the webmail, where you can look at them
@@ -355,6 +389,11 @@ Open `https://eisenberg.dev/mail` on the phone, sign in, add it to the home scre
 there, then account menu, **Mail settings**, **Turn on notifications**, **Send a test
 notification**. Details are in the README under "On your phone".
 
+On the phone the bar at the bottom switches between **Mail**, **Files**, **Codes** and
+**Account**. Files has a **Photo** button that opens the camera and stores the picture at once.
+Codes has **Add account**, which opens the camera to photograph the QR code another site shows
+when you set up two-factor there.
+
 ## 12. Check that it works
 
 - [ ] `https://<site>/` shows the portfolio and `/mail` asks for a sign-in.
@@ -365,7 +404,11 @@ notification**. Details are in the README under "On your phone".
 - [ ] A message sent from the webmail arrives and passes SPF, DKIM and DMARC (check the headers).
 - [ ] A file uploaded to the file drop downloads again, and its public link works only while the
       switch is on.
-- [ ] Security settings shows your real IP address under "Signed-in devices". If it shows an AWS
+- [ ] Signing in with the password asks for the code from your private mailbox, and signing in
+      with the passkey asks for neither.
+- [ ] The Codes page lets you add an account. If it says the vault key is missing, step 6 was
+      skipped (the page picks the key up within a minute, no redeploy needed).
+- [ ] **Security and people** shows your real IP address under "Signed-in devices". If it shows an AWS
       address, `TrustedProxyHops` is wrong.
 - [ ] `aws logs tail /aws/lambda/eisenmail-inbox --since 1h` shows no errors. The function
       running every 15 minutes without any mail arriving is normal: that is the reconcile run.
@@ -384,7 +427,8 @@ notification**. Details are in the README under "On your phone".
 | Get a shell on the database host | `aws ssm start-session --target $INSTANCE_ID` (find `INSTANCE_ID` as in step 8). You are `ssm-user` and can use `sudo` |
 | Rotate the database password | in that shell: `sudo ROTATE_DB_PASSWORD=1 /usr/local/sbin/eisenmail-db-host`. It stores the new password in SSM. The functions notice the old one is refused and read the new one |
 | Rotate the tunnel key | in that shell: `sudo ROTATE_TUNNEL_KEY=1 /usr/local/sbin/eisenmail-db-host`. Then rerun the Deploy workflow, so both functions start fresh and read the new key |
-| Reset your sign-in | step 8 again (also signs out every device and switches two-factor off) |
+| Reset your sign-in | step 8 again, with `--email` as before. It also signs out every device, removes passkeys and switches two-factor off |
+| Locked out because the sign-in code does not arrive | step 8 again without `--email`: that switches the email check off. Sign in, then switch it on again under **Security and people** |
 | Database backups | automatic: a disk snapshot every day (kept 7 days) and a dump in S3 every night (kept 90 days). `aws s3 cp s3://$BACKUP_BUCKET/db/LATEST -` shows the newest. The alarm tells you if one is missed |
 | Restore, or test a restore | [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md). Run the drill there once after setup |
 | Resize the database host, grow its disk | [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md), "Changing the database host" |

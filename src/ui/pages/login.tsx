@@ -18,6 +18,8 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [needsCode, setNeedsCode] = useState(false);
+  /** set when the second step is a code sent by email: the text says where it went */
+  const [emailHint, setEmailHint] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,16 +48,22 @@ export default function Login() {
     setBusy(true);
     setError(null);
     try {
-      const user = await post<SessionUser>("/auth/login", { username, password, code: needsCode ? code : undefined });
+      const user = await post<SessionUser>("/auth/login", { username, password, code: needsCode && code ? code : undefined });
+      // after a password sign-in the app offers to add a passkey on this device
+      sessionStorage.setItem("eisenmail.offerPasskey", "1");
       queryClient.setQueryData(["session"], user);
       navigate("/mail", { replace: true });
     } catch (err) {
       const failure = err as ApiFailure;
       if (failure.code === "totp_required") {
         setNeedsCode(true);
+      } else if (failure.code === "email_code_required") {
+        setNeedsCode(true);
+        setEmailHint(failure.message);
+        setCode("");
       } else {
         setError(failure.message);
-        if (failure.code === "bad_totp") setCode("");
+        if (failure.code === "bad_totp" || failure.code === "bad_email_code") setCode("");
       }
     } finally {
       setBusy(false);
@@ -82,8 +90,25 @@ export default function Login() {
             </div>
             {needsCode && (
               <div className="space-y-1.5">
-                <Label htmlFor="code">Authentication code</Label>
-                <Input id="code" name="code" autoComplete="one-time-code" autoCapitalize="none" maxLength={24} placeholder="6 digit code, or a recovery code" autoFocus required value={code} onChange={(e) => setCode(e.target.value)} disabled={busy} />
+                <Label htmlFor="code">{emailHint ? "Code from your email" : "Authentication code"}</Label>
+                <Input id="code" name="code" autoComplete="one-time-code" autoCapitalize="none" inputMode={emailHint ? "numeric" : undefined} maxLength={24} placeholder={emailHint ? "6 digit code" : "6 digit code, or a recovery code"} autoFocus required value={code} onChange={(e) => setCode(e.target.value)} disabled={busy} />
+                {emailHint && (
+                  <p className="text-muted-foreground text-xs">
+                    {emailHint}.{" "}
+                    <button
+                      type="button"
+                      className="text-primary hover:underline"
+                      disabled={busy}
+                      onClick={() => {
+                        // asking again without a code sends a new one (at most one a minute)
+                        setCode("");
+                        void post("/auth/login", { username, password }).catch((err: ApiFailure) => setError(err.code === "email_code_required" ? null : err.message));
+                      }}
+                    >
+                      Send a new code
+                    </button>
+                  </p>
+                )}
               </div>
             )}
             {error && <p role="alert" className="text-destructive">{error}</p>}

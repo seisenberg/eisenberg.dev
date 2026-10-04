@@ -74,7 +74,9 @@ export async function updateMember(body: { id?: unknown; password?: unknown; dom
   if (body.password !== undefined) {
     const passhash = await hashPassword(checkPassword(body.password));
     await tx(async (client) => {
-      await client.query('update webmail_users set passhash = $2, totp_secret = null, totp_last_step = null where id = $1', [id, passhash]);
+      // a reset is the member's way back in: every second step goes, they set it up again
+      await client.query('update webmail_users set passhash = $2, totp_secret = null, totp_last_step = null, verify_email = null where id = $1', [id, passhash]);
+      await client.query('delete from login_challenges where user_id = $1', [id]);
       await client.query('delete from webmail_recovery_codes where user_id = $1', [id]);
       await client.query('delete from webauthn_credentials where user_id = $1', [id]);
       await signOutEverywhere(client, id);
@@ -87,7 +89,7 @@ export async function deleteMember(ctx: Context, body: { id?: unknown }): Promis
   if (id === (ctx.state.auth as AuthState).userId) throw new HttpError(400, 'You cannot remove yourself');
   await tx(async (client) => {
     await signOutEverywhere(client, id);
-    for (const table of ['webmail_recovery_codes', 'webauthn_credentials', 'webauthn_challenges', 'push_subscriptions', 'drafts']) {
+    for (const table of ['webmail_recovery_codes', 'webauthn_credentials', 'webauthn_challenges', 'push_subscriptions', 'drafts', 'totp_entries', 'login_challenges']) {
       await client.query(`delete from ${table} where user_id = $1`, [id]);
     }
     await client.query('delete from webmail_users where id = $1', [id]);

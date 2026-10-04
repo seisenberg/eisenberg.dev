@@ -123,7 +123,8 @@ The relay works like the one classified-ad sites use:
 
 Below 768px the webmail becomes one screen at a time (Mailboxes, list, message) with the system
 back gesture working between them. Swipe a row left to delete and right to toggle read. Wide HTML
-mail is scaled to fit. The site is an installable web app: unread badge on the icon, push
+mail is scaled to fit. A bar at the bottom switches between Mail, Files, Codes and the account
+menu with one tap. The site is an installable web app: unread badge on the icon, push
 notifications, 30-day sliding sign-in. The service worker handles notifications only and caches
 nothing, so mail never sits in a browser cache.
 
@@ -138,20 +139,46 @@ it from the home screen, then account menu, **Mail settings**, **Turn on notific
 
 Upload, download and delete files in S3 from the browser. Everything is private. Switching on
 "Public link" moves the file to a separate location and gives it a `/public/<name>` address.
-Neither bucket is publicly readable; downloads are short-lived signed links.
+Neither bucket is publicly readable; downloads are short-lived signed links. On a phone the
+**Photo** button opens the camera and stores the picture straight away.
 
 ![File drop](docs/screenshots/files.png)
 
-### Sign-in and people
+### Codes: a built-in authenticator
 
-Passkeys (Face ID, Touch ID, a device PIN) sign in without a password and cannot be phished. The
-password remains as a fallback, with an authenticator code and one-time recovery codes. The owner
-can add **members**: separate sign-ins that see only the mail of chosen domains, for someone who
-shares one company but should not see the rest.
+A small authenticator for the six digit codes other sites ask for. Add an account by taking a
+picture of the QR code the site shows (on a phone the camera opens directly), by choosing a
+screenshot, by pasting the setup link, or by typing the key. A Google Authenticator export QR
+brings in many accounts at once. The secrets are encrypted in the database with a key the database
+does not have, and they are never sent back to the browser: the server answers with the current
+code only.
+
+![Authenticator codes](docs/screenshots/codes.png)
+
+Okta Verify and Microsoft Authenticator do not let accounts be exported. For those, sign in to the
+service, add a new "authenticator app" (Google Authenticator) factor, and photograph the QR code it
+shows.
 
 | | |
 | --- | --- |
-| ![Passkeys, password and two-factor](docs/screenshots/security.png) | ![Members limited to chosen domains](docs/screenshots/people.png) |
+| ![Codes on a phone](docs/screenshots/phone-codes.png) | ![Adding an account with the camera](docs/screenshots/phone-codes-add.png) |
+
+### Sign-in and people
+
+Sign-in works the way GitHub's does. A password alone is not enough: a six digit code is sent to a
+private mailbox outside the system (or comes from an authenticator app, if you prefer that).
+Straight after such a sign-in the site offers to add a **passkey**. From then on that device signs
+in with Face ID, Touch ID or its PIN: no password, no code, and nothing a fake site could capture.
+The owner can add **members**: separate sign-ins that see only the mail of chosen domains, for
+someone who shares one company but should not see the rest.
+
+| | |
+| --- | --- |
+| ![Code from the private mailbox](docs/screenshots/phone-login-code.png) | ![The offer to add a passkey](docs/screenshots/phone-passkey-offer.png) |
+
+| | |
+| --- | --- |
+| ![Passkeys, sign-in code, password and two-factor](docs/screenshots/security.png) | ![Members limited to chosen domains](docs/screenshots/people.png) |
 
 ### Nothing gets lost
 
@@ -173,7 +200,8 @@ Follows the system.
 
 Read [SECURITY.md](SECURITY.md) for the design and the findings of an independent review. In short:
 
-- passkeys, scrypt password hashes, TOTP with recovery codes, revocable server-side sessions in
+- passkeys, scrypt password hashes, a second step for every password sign-in (emailed code, or
+  TOTP with recovery codes), authenticator secrets encrypted at rest, revocable server-side sessions in
   `HttpOnly`, `Secure`, `SameSite=Strict`, `__Host-` cookies, three-layer CSRF defence, login
   throttling that an attacker cannot turn into a lockout;
 - every query scoped to what the signed-in user may see;

@@ -336,6 +336,11 @@ Resources:
                 Effect: Allow
                 Action: ssm:GetParameter
                 Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*"
+              # The authenticator vault belongs to the web function alone.
+              - Sid: NotTheVaultKey
+                Effect: Deny
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/vault_key"
 
 Outputs:
   DeployRoleArn:

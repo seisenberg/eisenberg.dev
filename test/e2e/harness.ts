@@ -28,6 +28,8 @@ export interface E2E {
   db: LocalDb;
   /** A stand-in for a sender's image host, and every request it received. */
   images: { origin: string; requests: { path: string; headers: Record<string, unknown> }[] };
+  /** Mail the system sent (nothing leaves the machine in tests). */
+  outbox: { to: string[]; raw: string }[];
   stop(): Promise<void>;
 }
 
@@ -52,6 +54,14 @@ export async function startE2E(): Promise<E2E> {
   // addresses; the test switches that one safeguard off (impossible in production).
   const { default: config } = await import('../../src/server/config.js');
   config.imageProxy.allowPrivate = true;
+  const outbox: E2E['outbox'] = [];
+  const { setTransport } = await import('../../src/server/send.js');
+  setTransport({
+    async send(raw, _from, to) {
+      outbox.push({ to, raw: raw.toString('utf8') });
+      return `e2e-${outbox.length}`;
+    },
+  });
   const requests: E2E['images']['requests'] = [];
   const imageHost = http.createServer((req, res) => {
     requests.push({ path: req.url ?? '', headers: req.headers });
@@ -83,7 +93,7 @@ export async function startE2E(): Promise<E2E> {
     await db.stop();
     throw err;
   }
-  return finish(base, browser, db, server, imageHost, { origin: imageOrigin, requests });
+  return finish(base, browser, db, server, imageHost, { origin: imageOrigin, requests }, outbox);
 }
 
 function launch(chrome: string): Promise<Browser> {
@@ -95,12 +105,13 @@ function launch(chrome: string): Promise<Browser> {
   });
 }
 
-function finish(base: string, browser: Browser, db: LocalDb, server: Server, imageHost: Server, images: E2E['images']): E2E {
+function finish(base: string, browser: Browser, db: LocalDb, server: Server, imageHost: Server, images: E2E['images'], outbox: E2E['outbox']): E2E {
   return {
     base,
     browser,
     db,
     images,
+    outbox,
     async stop() {
       await browser.close().catch(() => {});
       server.close();

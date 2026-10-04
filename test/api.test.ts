@@ -871,12 +871,12 @@ test('review fixes: what a member can infer, and what a password change invalida
   const me = (await local.pool.query('select id from webmail_users where email = $1', [DEV_USER.username])).rows[0].id;
   await call('POST', '/api/push/subscribe', { endpoint: 'https://web.push.apple.com/owner-phone', keys });
   await local.pool.query(`insert into webauthn_credentials (credential_id, user_id, public_key) values ('planted-by-intruder', $1, '\\x00')`, [me]);
-  assert.equal((await call('POST', '/api/auth/password', { currentPassword: DEV_USER.password, newPassword: 'a-brand-new-password-1' })).status, 204);
+  assert.equal((await call('POST', '/api/auth/password', { currentPassword: DEV_USER.password, newPassword: 'a-brand-new-password-1' })).status, 200);
   for (const table of ['webauthn_credentials', 'push_subscriptions', 'webmail_devices']) {
     assert.equal((await local.pool.query(`select 1 from ${table} where user_id = $1`, [me])).rowCount, 0, table);
   }
   assert.equal((await call('GET', '/api/auth/me')).status, 200, 'this session stays');
-  assert.equal((await call('POST', '/api/auth/password', { currentPassword: 'a-brand-new-password-1', newPassword: DEV_USER.password })).status, 204);
+  assert.equal((await call('POST', '/api/auth/password', { currentPassword: 'a-brand-new-password-1', newPassword: DEV_USER.password })).status, 200);
 
   // signing out takes the device's subscription with it
   await call('POST', '/api/push/subscribe', { endpoint: 'https://web.push.apple.com/owner-phone', keys });
@@ -986,4 +986,167 @@ test('image proxy: only public raster images, only for addresses that are in the
     config.imageProxy.allowPrivate = false;
     host.close();
   }
+});
+
+test('authenticator: secrets are stored encrypted, only codes come back, each user has their own', async () => {
+  const { totpCode, base32Decode } = await import('../src/server/otp.js');
+  const { parseOtpauth, parseMigration } = await import('../src/server/vault.js');
+  // RFC 6238 test vectors (secret "12345678901234567890", time 59 s)
+  assert.equal(totpCode(Buffer.from('12345678901234567890'), 1, 'SHA1', 8), '94287082');
+  assert.equal(totpCode(Buffer.from('12345678901234567890123456789012'), 1, 'SHA256', 8), '46119246');
+
+  const secret = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+  const uri = `otpauth://totp/GitHub:sam%40example.org?secret=${secret}&issuer=GitHub`;
+  assert.deepEqual({ ...parseOtpauth(uri), secret: undefined }, { issuer: 'GitHub', account: 'sam@example.org', secret: undefined, algorithm: 'SHA1', digits: 6, period: 30 });
+
+  assert.deepEqual((await call('GET', '/api/codes')).json, { available: true, entries: [] });
+  assert.equal((await call('POST', '/api/codes', { uris: [uri, 'otpauth://totp/AWS:root?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&algorithm=SHA256&digits=8&period=60'] })).json.added, 2);
+  const listed = (await call('GET', '/api/codes')).json.entries;
+  assert.deepEqual(listed.map((e: Json) => [e.issuer, e.account, e.code.length, e.period]), [['AWS', 'root', 8, 60], ['GitHub', 'sam@example.org', 6, 30]]);
+  const github = listed[1];
+  const step = Math.floor(Date.now() / 30_000);
+  assert.ok([step - 1, step, step + 1].some((s) => totpCode(base32Decode(secret), s) === github.code), 'the code is the right one for now');
+  assert.ok(github.remaining >= 1 && github.remaining <= 30);
+  assert.ok(!JSON.stringify(listed).includes(secret), 'the secret itself is never returned');
+  // at rest: encrypted, and not with something that leaves the plain bytes visible
+  const rows = await local.pool.query('select secret_enc from totp_entries');
+  assert.ok(rows.rows.every((r) => !r.secret_enc.includes(base32Decode(secret)) && r.secret_enc.length >= 28 + 16));
+
+  // a Google Authenticator export code: two accounts in one protocol-buffers payload
+  const field = (n: number, wire: number, body: Buffer | number) => (wire === 2 ? Buffer.concat([Buffer.from([(n << 3) | 2, (body as Buffer).length]), body as Buffer]) : Buffer.from([(n << 3) | 0, body as number]));
+  const account = (name: string, issuer: string, type: number) => field(1, 2, Buffer.concat([field(1, 2, Buffer.from('migrated-secret-0001')), field(2, 2, Buffer.from(name)), field(3, 2, Buffer.from(issuer)), field(4, 0, 1), field(5, 0, 1), field(6, 0, type)]));
+  const migration = `otpauth-migration://offline?data=${encodeURIComponent(Buffer.concat([account('Dropbox:sam@example.org', 'Dropbox', 2), account('old-hotp', 'Counter', 1), account('sam@work.example', 'Okta', 2)]).toString('base64'))}`;
+  assert.deepEqual(parseMigration(migration).map((p) => [p.issuer, p.account]), [['Dropbox', 'sam@example.org'], ['Okta', 'sam@work.example']]);
+  // a real export also carries version and batch fields; a negative batch id is a ten byte varint
+  const withBatch = `otpauth-migration://offline?data=${encodeURIComponent(Buffer.concat([account('sam@example.org', 'Slack', 2), field(2, 0, 1), field(3, 0, 1), field(4, 0, 0), Buffer.from([(5 << 3) | 0, 0x9c, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01])]).toString('base64'))}`;
+  assert.deepEqual(parseMigration(withBatch).map((p) => p.issuer), ['Slack']);
+  assert.throws(() => parseMigration(`otpauth-migration://offline?data=${encodeURIComponent(Buffer.from([(5 << 3) | 0, ...Array(11).fill(0xff)]).toString('base64'))}`), /damaged/);
+  assert.equal((await call('POST', '/api/codes', { uris: [migration] })).json.added, 2);
+  assert.equal((await call('POST', '/api/codes', { manual: { issuer: 'Bank', account: 'sam', secret: 'jbsw y3dp ehpk 3pxp jbsw y3dp ehpk 3pxp' } })).json.added, 1);
+
+  for (const bad of [{ uris: ['https://example.org'] }, { uris: ['otpauth://hotp/X?secret=JBSWY3DPEHPK3PXP&counter=1'] }, { uris: ['otpauth://totp/X?secret=AA'] }, { manual: { secret: 'short' } }, {}, { uris: ['otpauth-migration://offline?data=%%%'] }, { uris: ['otpauth://totp/Acme%ZZ:me?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP'] }]) {
+    assert.equal((await call('POST', '/api/codes', bad)).status, 400, JSON.stringify(bad));
+  }
+
+  // another user sees none of it and cannot touch it
+  await call('POST', '/api/users', { username: 'lee', password: 'a-long-enough-password', domains: ['harborlight.example'] });
+  const login = await call('POST', '/api/auth/login', { username: 'lee', password: 'a-long-enough-password' }, { noCookie: true, headers: { 'x-forwarded-for': '198.51.100.220' } });
+  const lee = { noCookie: true, headers: { cookie: login.headers.getSetCookie().find((c) => c.startsWith('eisenmail_dev='))!.split(';')[0] } };
+  assert.deepEqual((await call('GET', '/api/codes', undefined, lee)).json.entries, []);
+  await call('POST', '/api/codes/delete', { id: github.id }, lee);
+  assert.equal((await call('POST', '/api/codes/rename', { id: github.id, issuer: 'x', account: 'y' }, lee)).status, 404);
+  assert.equal((await call('GET', '/api/codes')).json.entries.length, 5);
+  // a row copied to another user does not decrypt there
+  await local.pool.query(`insert into totp_entries (user_id, issuer, account, secret_enc) select (select id from webmail_users where email = 'lee'), 'stolen', '', secret_enc from totp_entries where id = $1`, [github.id]);
+  assert.equal((await call('GET', '/api/codes', undefined, lee)).json.entries[0].code, '');
+  assert.equal((await call('GET', '/api/codes', undefined, { noCookie: true })).status, 401);
+
+  assert.equal((await call('POST', '/api/codes/rename', { id: github.id, issuer: 'GitHub (work)', account: 'sam' })).status, 204);
+  assert.equal((await call('POST', '/api/codes/delete', { id: listed[0].id })).status, 204);
+  const after = (await call('GET', '/api/codes')).json.entries;
+  assert.equal(after.length, 4);
+  assert.ok(after.some((e: Json) => e.issuer === 'GitHub (work)'));
+  const users = (await call('GET', '/api/users')).json;
+  await call('POST', '/api/users/delete', { id: users.find((u: Json) => u.username === 'lee').id });
+  // a removed member's entries go with them
+  assert.equal((await local.pool.query(`select 1 from totp_entries where issuer = 'stolen'`)).rowCount, 0);
+});
+
+test('sign-in code by email: required after the password, single use, and a fresh sign-in may add a passkey', async () => {
+  const codeIn = (m: { raw: string }) => /Code: (\d{6})/.exec(m.raw)![1];
+  const mailsTo = (address: string) => sent.filter((m) => m.to.includes(address));
+
+  // the mailbox must be outside this system, and the password is needed to set it
+  assert.equal((await call('POST', '/api/auth/email-check/start', { email: 'me@eisenberg.dev', currentPassword: DEV_USER.password })).status, 400);
+  assert.equal((await call('POST', '/api/auth/email-check/start', { email: 'me@private.example', currentPassword: 'wrong-wrong-wrong' })).status, 403);
+  const started = await call('POST', '/api/auth/email-check/start', { email: 'Me@Private.example', currentPassword: DEV_USER.password });
+  assert.deepEqual(started.json, { sentTo: 'm•••@private.example' });
+  const setup = mailsTo('me@private.example').at(-1)!;
+  assert.match(setup.from, /^no-reply@/);
+  assert.equal((await call('POST', '/api/auth/email-check/confirm', { code: '000000' })).status, 400);
+  assert.equal((await call('POST', '/api/auth/email-check/confirm', { code: codeIn(setup) })).status, 200);
+  assert.equal((await call('GET', '/api/auth/me')).json.emailCheck, 'm•••@private.example');
+
+  // signing in: the password alone is no longer enough
+  await local.pool.query('delete from login_challenges');
+  const ip = { 'x-forwarded-for': '198.51.100.230' };
+  const first = await call('POST', '/api/auth/login', DEV_USER, { noCookie: true, headers: ip });
+  assert.equal(first.status, 401);
+  assert.equal(first.json.code, 'email_code_required');
+  assert.match(first.json.error, /m•••@private\.example/);
+  assert.equal(first.headers.get('set-cookie'), null);
+  const mail = mailsTo('me@private.example').at(-1)!;
+  assert.match(mail.raw, /Subject: Your sign-in code/);
+  assert.doesNotMatch(mail.raw, new RegExp(DEV_USER.password));
+  const count = mailsTo('me@private.example').length;
+  // asking again within a minute does not send another
+  await call('POST', '/api/auth/login', DEV_USER, { noCookie: true, headers: ip });
+  assert.equal(mailsTo('me@private.example').length, count);
+  // the stored code is a hash
+  const stored = await local.pool.query('select code_hash from login_challenges');
+  assert.ok(stored.rows.every((r) => !r.code_hash.toString('utf8').includes(codeIn(mail))));
+
+  assert.equal((await call('POST', '/api/auth/login', { ...DEV_USER, code: '123456' === codeIn(mail) ? '654321' : '123456' }, { noCookie: true, headers: ip })).json.code, 'bad_email_code');
+  // a wrong password with the right code gets nowhere
+  assert.equal((await call('POST', '/api/auth/login', { username: DEV_USER.username, password: 'not-the-password-1', code: codeIn(mail) }, { noCookie: true, headers: ip })).json.code, 'bad_credentials');
+  const ok = await call('POST', '/api/auth/login', { ...DEV_USER, code: codeIn(mail) }, { noCookie: true, headers: ip });
+  assert.equal(ok.status, 200, ok.text);
+  assert.equal(ok.json.fresh, true);
+  // the code cannot be used twice
+  assert.notEqual((await call('POST', '/api/auth/login', { ...DEV_USER, code: codeIn(mail) }, { noCookie: true, headers: ip })).status, 200);
+
+  // five wrong tries kill a code, even if the sixth is right
+  await local.pool.query('delete from login_challenges');
+  await local.pool.query('delete from webmail_login_attempts');
+  await call('POST', '/api/auth/login', DEV_USER, { noCookie: true, headers: ip });
+  const second = codeIn(mailsTo('me@private.example').at(-1)!);
+  await local.pool.query('update login_challenges set attempts = 5');
+  assert.equal((await call('POST', '/api/auth/login', { ...DEV_USER, code: second }, { noCookie: true, headers: ip })).json.code, 'bad_email_code');
+  await local.pool.query('delete from webmail_login_attempts');
+
+  // asking for more codes does not buy more tries: only the newest code counts
+  await local.pool.query('delete from login_challenges');
+  await call('POST', '/api/auth/login', DEV_USER, { noCookie: true, headers: ip });
+  const older = codeIn(mailsTo('me@private.example').at(-1)!);
+  await local.pool.query(`update login_challenges set created_at = created_at - interval '2 minutes'`);
+  await call('POST', '/api/auth/login', DEV_USER, { noCookie: true, headers: ip });
+  const newer = codeIn(mailsTo('me@private.example').at(-1)!);
+  assert.equal((await local.pool.query('select 1 from login_challenges where expires_at > now()')).rowCount, 1);
+  const wrong = ['111111', '222222', '333333', '444444', '555555', '666666', '777777'].filter((c) => c !== older && c !== newer);
+  for (const guess of wrong.slice(0, 5)) {
+    assert.equal((await call('POST', '/api/auth/login', { ...DEV_USER, code: guess }, { noCookie: true, headers: ip })).json.code, 'bad_email_code');
+    await local.pool.query('delete from webmail_login_attempts');
+  }
+  for (const dead of [older, newer]) {
+    assert.equal((await call('POST', '/api/auth/login', { ...DEV_USER, code: dead }, { noCookie: true, headers: ip })).json.code, 'bad_email_code', 'neither the older nor the used-up code works');
+    await local.pool.query('delete from webmail_login_attempts');
+  }
+  assert.equal((await local.pool.query('select max(attempts)::int as n from login_challenges')).rows[0].n, 5);
+
+  // changing the address within the minute: nothing is sent, and the answer says so
+  await local.pool.query('delete from login_challenges');
+  assert.equal((await call('POST', '/api/auth/email-check/start', { email: 'typo@private.example', currentPassword: DEV_USER.password })).status, 200);
+  const corrected = await call('POST', '/api/auth/email-check/start', { email: 'right@private.example', currentPassword: DEV_USER.password });
+  assert.equal(corrected.status, 429);
+  assert.equal(mailsTo('right@private.example').length, 0);
+  // a minute later the new address gets its code, and the code for the first one is dead
+  await local.pool.query(`update login_challenges set created_at = created_at - interval '2 minutes'`);
+  assert.equal((await call('POST', '/api/auth/email-check/start', { email: 'right@private.example', currentPassword: DEV_USER.password })).status, 200);
+  assert.equal((await call('POST', '/api/auth/email-check/confirm', { code: codeIn(mailsTo('typo@private.example').at(-1)!) })).status, 400);
+  assert.equal((await call('GET', '/api/auth/me')).json.emailCheck, 'm•••@private.example');
+  await local.pool.query('delete from login_challenges');
+
+  // a session that has just signed in with the password may add a passkey without retyping it; an older one may not
+  const fresh = { noCookie: true, headers: { cookie: ok.headers.getSetCookie().find((c) => c.startsWith('eisenmail_dev='))!.split(';')[0] } };
+  assert.equal((await call('POST', '/api/auth/passkeys/register-options', {}, fresh)).status, 200);
+  await local.pool.query(`update webmail_sessions set created_at = now() - interval '11 minutes'`);
+  assert.equal((await call('POST', '/api/auth/passkeys/register-options', {}, fresh)).status, 403);
+  assert.equal((await call('GET', '/api/auth/me', undefined, fresh)).json.fresh, false);
+
+  // a password change names the mailbox the codes go to
+  const changed = await call('POST', '/api/auth/password', { currentPassword: DEV_USER.password, newPassword: DEV_USER.password });
+  assert.deepEqual(changed.json, { emailCheck: 'm•••@private.example' });
+
+  assert.equal((await call('POST', '/api/auth/email-check/disable', { currentPassword: DEV_USER.password })).status, 204);
+  assert.equal((await call('GET', '/api/auth/me')).json.emailCheck, null);
 });

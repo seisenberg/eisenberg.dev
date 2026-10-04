@@ -152,3 +152,25 @@ export async function sendMail(v: Viewer, input: SendRequest): Promise<{ id: str
   });
   return { id };
 }
+
+/**
+ * Mail the system itself sends (sign-in codes). It goes straight to the transport and is not
+ * stored as a message. The sender is a no-reply address on the first configured domain.
+ */
+export async function sendSystemMail(to: string, subject: string, text: string): Promise<void> {
+  const domain = config.mail.domains[0] ?? (config.mail.defaultFrom ? config.mail.defaultFrom.slice(config.mail.defaultFrom.lastIndexOf('@') + 1) : 'localhost');
+  const from = `no-reply@${domain}`;
+  const raw: Buffer = await new MailComposer({
+    from: { name: 'eisenmail', address: from },
+    to,
+    subject: headerSafe(subject),
+    text,
+    messageId: `<${crypto.randomUUID()}@${domain}>`,
+    date: new Date(),
+    headers: { 'Auto-Submitted': 'auto-generated' },
+    xMailer: false,
+    disableFileAccess: true,
+    disableUrlAccess: true,
+  } as ConstructorParameters<typeof MailComposer>[0]).compile().build();
+  await transport.send(raw, from, [to], [], []);
+}

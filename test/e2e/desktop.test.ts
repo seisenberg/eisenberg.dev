@@ -207,28 +207,80 @@ test('addresses: forward, forward style, note and block', async () => {
   await page.keyboard.press('Escape');
 });
 
-test('passkey: register, sign out, sign in without a password', async () => {
+test('authenticator: add an account from a picture of its QR code', async () => {
+  const QRCode = (await import('qrcode')).default;
+  const { totpCode, base32Decode } = await import('../../src/server/otp.js');
+  const secret = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+  const picture = path.join(tmp, 'setup-qr.png');
+  await QRCode.toFile(picture, `otpauth://totp/GitHub:sam%40example.org?secret=${secret}&issuer=GitHub`, { width: 600, margin: 4 });
+
+  await page.goto(`${e2e.base}/codes`, { waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => document.body.innerText.includes('No accounts yet'));
+  await press(page, 'button', 'Add account');
+  const input = await page.waitForSelector('input[aria-label="Choose a picture of a QR code"]');
+  await (input as unknown as { uploadFile(p: string): Promise<void> }).uploadFile(picture);
+  await page.waitForFunction(() => document.body.innerText.includes('Account added'));
+  await page.waitForFunction(() => /GitHub/.test(document.body.innerText) && /\d{3} \d{3}/.test(document.body.innerText));
+  const shown = await page.evaluate(() => /(\d{3}) (\d{3})/.exec(document.querySelector('main ul')!.textContent ?? '')!.slice(1).join(''));
+  const step = Math.floor(Date.now() / 30_000);
+  assert.ok([step - 1, step, step + 1].some((s) => totpCode(base32Decode(secret), s) === shown), `the code shown (${shown}) is the right one`);
+  assert.ok(!(await page.content()).includes(secret), 'the secret is not in the page');
+});
+
+test('sign-in code by email, then the offer to add a passkey, then a passkey sign-in', async () => {
+  const { DEV_USER } = await import('../../scripts/seed.js');
+  const codeFrom = () => /Code: (\d{6})/.exec(e2e.outbox.at(-1)!.raw)![1];
+  // a virtual authenticator, so the browser has somewhere to keep a passkey
   const cdp = await page.createCDPSession();
   await cdp.send('WebAuthn.enable');
   await cdp.send('WebAuthn.addVirtualAuthenticator', {
     options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
   });
+
+  // switch the email check on in the settings
   await press(page, '[data-slot=dropdown-menu-trigger]', 'sam');
   await press(page, '[role=menuitem]', 'Security');
-  await page.waitForSelector('#pk-pw');
-  await page.type('#pk-pw', (await import('../../scripts/seed.js')).DEV_USER.password);
-  await press(page, 'button', 'Add passkey');
-  await page.waitForFunction(() => document.body.innerText.includes('Passkey added'), { timeout: 10000 });
+  await page.waitForSelector('#ec-email');
+  await page.type('#ec-email', 'owner@mailbox.example');
+  await page.type('#ec-pw', DEV_USER.password);
+  await press(page, 'button', 'Send a code to confirm');
+  await page.waitForSelector('#ec-code');
+  assert.deepEqual(e2e.outbox.at(-1)!.to, ['owner@mailbox.example']);
+  await page.type('#ec-code', codeFrom());
+  await press(page, 'button', 'Confirm');
+  await page.waitForFunction(() => document.body.innerText.includes('A password sign-in also needs the code'));
   await page.keyboard.press('Escape');
 
+  // sign out, sign in with the password: the code from the email is asked for
   await press(page, '[data-slot=dropdown-menu-trigger]', 'sam');
   await press(page, '[role=menuitem]', 'Sign out');
   await page.waitForSelector('#username');
+  await e2e.db.pool.query('delete from login_challenges'); // (the one-a-minute limit would hold back the next code)
+  const before = e2e.outbox.length;
+  await page.type('#username', DEV_USER.username);
+  await page.type('#password', DEV_USER.password);
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.body.innerText.includes('Code from your email'));
+  assert.equal(await page.evaluate(() => location.pathname), '/login', 'the password alone does not sign in');
+  assert.equal(e2e.outbox.length, before + 1);
+  await page.type('#code', codeFrom());
+  await Promise.all([page.waitForFunction(() => location.pathname === '/mail'), page.keyboard.press('Enter')]);
+
+  // straight after a password sign-in, a passkey is offered and added without retyping the password
+  await page.waitForSelector('[role=region][aria-label="Add a passkey"]');
+  await press(page, '[role=region][aria-label="Add a passkey"] button', 'Add a passkey');
+  await page.waitForFunction(() => document.body.innerText.includes('Passkey added'), { timeout: 10000 });
+
+  // next time: no password, no code
+  await press(page, '[data-slot=dropdown-menu-trigger]', 'sam');
+  await press(page, '[role=menuitem]', 'Sign out');
+  await page.waitForSelector('#username');
+  const mails = e2e.outbox.length;
   await press(page, 'button', 'Sign in with a passkey');
   await page.waitForFunction(() => location.pathname === '/mail', { timeout: 10000 });
   await page.waitForSelector('[role=option]');
-  const me = await page.evaluate(async () => (await fetch('/api/auth/me')).json());
-  assert.equal(me.username, 'sam');
+  assert.equal(e2e.outbox.length, mails, 'a passkey sign-in sends no code');
+  assert.equal(await page.$('[role=region][aria-label="Add a passkey"]'), null, 'and the offer is not repeated');
 });
 
 test('file drop: upload, private by default, public link on demand', async () => {

@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, FileIcon, Globe, Loader2, Lock, Trash2, Upload } from "lucide-react";
+import { Camera, Copy, Download, FileIcon, Globe, Loader2, Lock, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -35,13 +35,22 @@ function putWithProgress(ticket: UploadTicket, file: File, onProgress: (fraction
   });
 }
 
-export default function FilesPage({ header, footer }: { header: React.ReactNode; footer: React.ReactNode }) {
+/** "Photo 2026-10-04 14.32.10.jpg": the camera gives every picture the same name. */
+function photoName(file: File): string {
+  const d = new Date();
+  const two = (n: number) => String(n).padStart(2, "0");
+  const ext = /\.(jpe?g|png|heic|heif|webp)$/i.exec(file.name)?.[1].toLowerCase() ?? (file.type === "image/png" ? "png" : "jpg");
+  return `Photo ${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}.${two(d.getMinutes())}.${two(d.getSeconds())}.${ext}`;
+}
+
+export default function FilesPage({ header, footer, tabs }: { header: React.ReactNode; footer: React.ReactNode; tabs: React.ReactNode }) {
   const qc = useQueryClient();
   const listing = useQuery({ queryKey: ["files"], queryFn: () => get<Listing>("/files") });
   const [uploads, setUploads] = useState<UploadState[]>([]);
   const [dragging, setDragging] = useState(false);
   const [filter, setFilter] = useState<"all" | "private" | "public">("all");
   const picker = useRef<HTMLInputElement>(null);
+  const camera = useRef<HTMLInputElement>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ["files"] });
 
   async function upload(files: File[]) {
@@ -110,7 +119,25 @@ export default function FilesPage({ header, footer }: { header: React.ReactNode;
       : navigator.clipboard.writeText(location.origin + f.publicPath).then(() => toast.success("Public link copied"), () => toast.error("Could not copy the link"));
   const downloadHref = (f: FileEntry) => `/api/files/download/${f.isPublic ? "public" : "private"}/${encodeURIComponent(f.name)}`;
   const confirmRemove = (f: FileEntry) => window.confirm(`Delete "${f.name}"? This cannot be undone.`) && remove.mutate(f);
-  const uploadInput = <input ref={picker} type="file" multiple hidden onChange={(e) => { void upload(Array.from(e.target.files ?? [])); e.target.value = ""; }} />;
+  const uploadInput = (
+    <>
+      <input ref={picker} type="file" multiple hidden onChange={(e) => { void upload(Array.from(e.target.files ?? [])); e.target.value = ""; }} />
+      {/* capture: on a phone this opens the camera, and the picture goes straight into the file drop */}
+      <input
+        ref={camera}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        hidden
+        aria-label="Take a photo"
+        onChange={(e) => {
+          const shot = e.target.files?.[0];
+          if (shot) void upload([new File([shot], photoName(shot), { type: shot.type || "image/jpeg" })]);
+          e.target.value = "";
+        }}
+      />
+    </>
+  );
   const uploadRows = uploads.map((u) => (
     <div key={u.name} className="flex items-center gap-3 border-b px-5 py-2.5 max-md:px-4">
       <Loader2 className="text-muted-foreground size-4 animate-spin" />
@@ -128,15 +155,19 @@ export default function FilesPage({ header, footer }: { header: React.ReactNode;
     );
     return (
       <div className="bg-background h-app flex flex-col text-[15px]">
-        <div className="bg-sidebar pt-safe shrink-0 border-b">{header}</div>
-        <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2.5">
-          {chip("all", "All")}
-          {chip("private", "Private")}
-          {chip("public", `Public${publicCount ? ` ${publicCount}` : ""}`)}
-          <div className="flex-1" />
-          <Button size="sm" className="h-9" onClick={() => picker.current?.click()} disabled={listing.data?.enabled === false}><Upload /> Upload</Button>
-          {uploadInput}
-        </div>
+        <header className="pt-safe shrink-0 border-b px-4 pb-2">
+          <div className="flex items-end gap-2 pt-3">
+            <h1 className="flex-1 text-[28px] leading-tight font-bold tracking-tight">Files</h1>
+            <Button size="sm" variant="outline" className="h-9" aria-label="Take a photo" onClick={() => camera.current?.click()} disabled={listing.data?.enabled === false}><Camera /> Photo</Button>
+            <Button size="sm" className="h-9" onClick={() => picker.current?.click()} disabled={listing.data?.enabled === false}><Upload /> Upload</Button>
+            {uploadInput}
+          </div>
+          <div className="flex items-center gap-2 pt-2.5">
+            {chip("all", "All")}
+            {chip("private", "Private")}
+            {chip("public", `Public${publicCount ? ` ${publicCount}` : ""}`)}
+          </div>
+        </header>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain">
           {listing.isLoading && <div className="text-muted-foreground flex h-40 items-center justify-center"><Loader2 className="size-5 animate-spin" /></div>}
           {listing.data?.enabled === false && <div className="text-muted-foreground m-4 rounded-lg border border-dashed p-6 text-center">File storage is not configured on this server.</div>}
@@ -144,7 +175,7 @@ export default function FilesPage({ header, footer }: { header: React.ReactNode;
           {listing.data?.enabled !== false && !listing.isLoading && files.length === 0 && uploads.length === 0 && (
             <div className="text-muted-foreground flex h-64 flex-col items-center justify-center gap-2">
               <Upload className="size-8 opacity-40" />
-              <div className="text-base">{filter === "public" ? "No public files" : "Tap Upload to add files"}</div>
+              <div className="text-base">{filter === "public" ? "No public files" : "Upload a file, or take a photo"}</div>
             </div>
           )}
           <ul>
@@ -167,7 +198,7 @@ export default function FilesPage({ header, footer }: { header: React.ReactNode;
             ))}
           </ul>
         </div>
-        <div className="bg-sidebar pb-safe shrink-0">{footer}</div>
+        {tabs}
       </div>
     );
   }

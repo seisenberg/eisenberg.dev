@@ -151,6 +151,10 @@ export interface SessionUser {
   /** owner: everything. member: mail for `domains` only, no file drop, no user management. */
   role: 'owner' | 'member';
   domains: string[] | null;
+  /** masked address that sign-in codes are emailed to, or null when the email check is off */
+  emailCheck: string | null;
+  /** true right after a password sign-in: a passkey may be added without retyping the password */
+  fresh?: boolean;
 }
 
 export interface SessionInfo {
@@ -283,4 +287,25 @@ export interface PasskeyInfo {
   name: string;
   createdAt: string;
   lastUsedAt: string | null;
+}
+
+// ---- authenticator ------------------------------------------------------------------------------
+
+export interface OtpEntry {
+  id: string;
+  issuer: string;
+  account: string;
+  /** the code right now */
+  code: string;
+  /** the code that follows it, shown when the current one is about to expire */
+  next: string;
+  period: number;
+  /** seconds until `code` expires */
+  remaining: number;
+}
+
+export interface OtpListing {
+  /** false when the server has no vault key: the feature is switched off */
+  available: boolean;
+  entries: OtpEntry[];
 }

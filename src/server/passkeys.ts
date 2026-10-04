@@ -7,10 +7,10 @@ import {
   verifyRegistrationResponse,
 } from '@simplewebauthn/server';
 import config from './config.js';
-import { confirmPassword, startSession, type AuthState } from './auth.js';
+import { confirmPassword, sessionUser, startSession, type AuthState } from './auth.js';
 import { query } from './db.js';
 import { HttpError } from './mail.js';
-import type { PasskeyInfo, SessionUser } from '../shared/api.js';
+import type { PasskeyInfo } from '../shared/api.js';
 
 // Passkeys (WebAuthn). A passkey signs in on its own: the device verifies the person (Face ID,
 // fingerprint, PIN), so it is two factors in one step and cannot be phished to another site.
@@ -62,7 +62,9 @@ const transportsOf = (v: unknown): Transport[] => (Array.isArray(v) ? (v.filter(
 export async function registerOptions(ctx: Context): Promise<void> {
   const auth = ctx.state.auth as AuthState;
   const body = (ctx.request.body ?? {}) as Record<string, unknown>;
-  if (!(await confirmPassword(ctx, body.currentPassword))) return;
+  // Straight after a password sign-in (password and second step, minutes ago) the password is not
+  // asked for again. Any later, or in a session started with a passkey, it is.
+  if (!(auth.fresh && body.currentPassword === undefined) && !(await confirmPassword(ctx, body.currentPassword))) return;
   const { rpID } = relyingParty(ctx);
   const existing = await query<{ credential_id: string; transports: string[] }>('select credential_id, transports from webauthn_credentials where user_id = $1', [auth.userId]);
   const options = await generateRegistrationOptions({
@@ -139,8 +141,8 @@ export async function login(ctx: Context): Promise<void> {
   const denied = new HttpError(401, 'That passkey is not recognised', 'bad_credentials');
   const credentialId = typeof response?.id === 'string' && response.id.length <= 1024 ? response.id : null;
   if (!credentialId) throw denied;
-  const res = await query<{ user_id: number; public_key: Buffer; counter: string; transports: string[]; username: string; totp: boolean; role: 'owner' | 'member'; domains: string[] | null }>(
-    `select c.user_id, c.public_key, c.counter::text as counter, c.transports, u.email as username, u.totp_secret is not null as totp, u.role, u.domains
+  const res = await query<{ user_id: number; public_key: Buffer; counter: string; transports: string[]; username: string; totp: boolean; role: 'owner' | 'member'; domains: string[] | null; verify_email: string | null }>(
+    `select c.user_id, c.public_key, c.counter::text as counter, c.transports, u.email as username, u.totp_secret is not null as totp, u.role, u.domains, u.verify_email
        from webauthn_credentials c join webmail_users u on u.id = c.user_id where c.credential_id = $1`,
     [credentialId],
   );
@@ -162,6 +164,6 @@ export async function login(ctx: Context): Promise<void> {
   }
   if (!result.verified) throw denied;
   await query('update webauthn_credentials set counter = $2, last_used_at = now() where credential_id = $1', [credentialId, result.authenticationInfo.newCounter]);
-  await startSession(ctx, cred.user_id, cred.username);
-  ctx.body = { username: cred.username, totpEnabled: cred.totp, role: cred.role, domains: cred.role === 'owner' ? null : (cred.domains ?? []) } satisfies SessionUser;
+  await startSession(ctx, cred.user_id, cred.username, 'passkey');
+  ctx.body = sessionUser({ username: cred.username, totpEnabled: cred.totp, role: cred.role, domains: cred.domains, verifyEmail: cred.verify_email });
 }

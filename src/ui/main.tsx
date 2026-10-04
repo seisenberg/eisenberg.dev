@@ -38,6 +38,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="/login" element={<Login />} />
             <Route path="/mail/*" element={<PrivateArea section="mail" />} />
             <Route path="/files" element={<PrivateArea section="files" />} />
+            <Route path="/codes" element={<PrivateArea section="codes" />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>

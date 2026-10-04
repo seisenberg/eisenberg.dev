@@ -48,7 +48,7 @@ function TouchButton({ label, onClick, disabled, children, className }: { label:
   );
 }
 
-export default function MailPage({ header, footer }: { header: React.ReactNode; footer: React.ReactNode }) {
+export default function MailPage({ header, footer, tabs }: { header: React.ReactNode; footer: React.ReactNode; tabs: React.ReactNode }) {
   const mobile = useIsMobile();
   const qc = useQueryClient();
   const loc = useMailLocation();
@@ -325,11 +325,13 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
     return (
       <div className="bg-background h-app flex flex-col">
         {screen === "boxes" && (
-          <div className="bg-sidebar pt-safe flex min-h-0 flex-1 flex-col">
-            {header}
-            <Sidebar mobile tree={tree.data} scope={scope} onSelect={loc.setScope} onEmpty={emptyAll} drafts={drafts.data?.length} />
-            <div className="pb-safe">{footer}</div>
-          </div>
+          <>
+            <div className="bg-sidebar pt-safe flex min-h-0 flex-1 flex-col">
+              <h1 className="px-4 pt-4 pb-1 text-[28px] leading-tight font-bold tracking-tight">Mailboxes</h1>
+              <Sidebar mobile tree={tree.data} scope={scope} onSelect={loc.setScope} onEmpty={emptyAll} drafts={drafts.data?.length} />
+            </div>
+            {tabs}
+          </>
         )}
 
         {screen === "list" && (
@@ -349,6 +351,7 @@ export default function MailPage({ header, footer }: { header: React.ReactNode; 
             </header>
             <InstallHint />
             {listPane}
+            {tabs}
           </>
         )}
 

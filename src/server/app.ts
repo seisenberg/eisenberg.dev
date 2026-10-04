@@ -16,6 +16,7 @@ import * as settings from './settings.js';
 import * as users from './users.js';
 import * as passkeys from './passkeys.js';
 import { fetchImage, imageLinks } from './image-proxy.js';
+import * as vault from './vault.js';
 import { checkName, deleteMailObjects, DIRECT_DOWNLOAD_LIMIT, disposition, fileStore, localPath, localWrite, stageDownload, visibilityOf } from './files.js';
 import type { FileListing, MailboxView } from '../shared/api.js';
 
@@ -164,6 +165,25 @@ export function createApp(options: AppOptions = {}): Koa {
   priv.post('/auth/totp/enable', auth.totpEnable);
   priv.post('/auth/totp/disable', auth.totpDisable);
   priv.post('/auth/recovery-codes', auth.regenerateRecoveryCodes);
+  priv.post('/auth/email-check/start', auth.emailCheckStart);
+  priv.post('/auth/email-check/confirm', auth.emailCheckConfirm);
+  priv.post('/auth/email-check/disable', auth.emailCheckDisable);
+
+  // ---- authenticator (one-time codes for other services) -----------------------------------------
+  priv.get('/codes', async (ctx) => {
+    ctx.body = await vault.listEntries(auth.viewerOf(ctx));
+  });
+  priv.post('/codes', async (ctx) => {
+    ctx.body = await vault.addEntries(auth.viewerOf(ctx), (ctx.request.body ?? {}) as never);
+  });
+  priv.post('/codes/rename', async (ctx) => {
+    await vault.renameEntry(auth.viewerOf(ctx), (ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
+  priv.post('/codes/delete', async (ctx) => {
+    await vault.deleteEntry(auth.viewerOf(ctx), (ctx.request.body ?? {}) as never);
+    ctx.status = 204;
+  });
   priv.get('/auth/passkeys', passkeys.list);
   priv.post('/auth/passkeys/register-options', passkeys.registerOptions);
   priv.post('/auth/passkeys/register', passkeys.register);

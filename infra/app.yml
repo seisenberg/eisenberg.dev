@@ -234,6 +234,9 @@ Resources:
           PUBLIC_FILES_PREFIX: public/
           VAPID_PUBLIC_KEY: !If [HasPush, !Ref VapidPublicKey, !Ref "AWS::NoValue"]
           VAPID_PRIVATE_KEY_SSM: !If [HasPush, !Ref VapidPrivateKeyParameter, !Ref "AWS::NoValue"]
+          # The key that encrypts the authenticator entries ("Codes"). Only the web function is
+          # given the name, and only its role may read it. No such parameter: the feature is off.
+          VAULT_KEY_SSM: !Sub "/${ProjectName}/vault_key"
 
   WebLogs:
     Type: AWS::Logs::LogGroup

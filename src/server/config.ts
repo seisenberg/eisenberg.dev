@@ -61,6 +61,11 @@ export interface Config {
     localDir: string;
     maxBytes: number;
   };
+  vault: {
+    /** 32 random bytes, base64: encrypts the authenticator secrets. From SSM in production. */
+    key: string | null;
+    keySsm: string | null;
+  };
   imageProxy: {
     /** Tests only: lets the proxy fetch from loopback. Always false in production. */
     allowPrivate: boolean;
@@ -132,6 +137,10 @@ function load(): Config {
       publicPrefix: env.PUBLIC_FILES_PREFIX ?? 'public/',
       localDir: env.FILES_LOCAL_DIR ?? '.data/files',
       maxBytes: int(env.FILES_MAX_BYTES, 2 * 1024 * 1024 * 1024),
+    },
+    vault: {
+      key: env.VAULT_KEY?.trim() || null,
+      keySsm: env.VAULT_KEY_SSM?.trim() || null,
     },
     imageProxy: {
       allowPrivate: !production && env.IMAGE_PROXY_ALLOW_PRIVATE === '1',

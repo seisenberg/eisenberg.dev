@@ -49,6 +49,13 @@ Details worth knowing:
   notifications on again on each device.
 - The settings of the system are the parameters of the three CloudFormation stacks.
 
+**One thing is deliberately not in any backup: the vault key.** The accounts on the Codes page are
+stored encrypted, and the key lives only in the SSM parameter `/eisenmail/vault_key`. A dump or a
+snapshot restores the encrypted entries; reading them needs the same key. Keep a copy of it in
+your password manager (SETUP.md, step 6), and when you move to other hardware pass it to the web
+server as `VAULT_KEY`. If the key is lost, the mail is unaffected, but each account on the Codes
+page has to be enrolled again at its site.
+
 ## Checking that backups happen
 
 If you set `AlertEmail`, the alarm `eisenmail-no-database-backup` sends you a message when no

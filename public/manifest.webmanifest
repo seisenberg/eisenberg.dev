@@ -16,6 +16,7 @@
   ],
   "shortcuts": [
     { "name": "New Message", "url": "/mail?compose=1" },
+    { "name": "Codes", "url": "/codes" },
     { "name": "Files", "url": "/files" }
   ]
 }

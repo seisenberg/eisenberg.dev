@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { startRegistration } from "@simplewebauthn/browser";
-import { Copy, KeyRound, Loader2, ShieldCheck, Trash2, UserPlus } from "lucide-react";
+import { Copy, KeyRound, Loader2, MailCheck, ShieldCheck, Trash2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -27,9 +27,9 @@ function PasswordSection() {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const change = useMutation({
-    mutationFn: () => post("/auth/password", { currentPassword: current, newPassword: next }),
-    onSuccess: () => {
-      toast.success("Password changed. Other devices were signed out, and passkeys and notifications were removed. Add them again from this device.", { duration: 10000 });
+    mutationFn: () => post<{ emailCheck: string | null }>("/auth/password", { currentPassword: current, newPassword: next }),
+    onSuccess: (res) => {
+      toast.success(`Password changed. Other devices were signed out, and passkeys and notifications were removed. Add them again from this device.${res?.emailCheck ? ` Sign-in codes still go to ${res.emailCheck}: check that this is your mailbox.` : ""}`, { duration: 12000 });
       void qc.invalidateQueries({ queryKey: ["passkeys"] });
       void qc.invalidateQueries({ queryKey: ["push"] });
       setCurrent("");
@@ -153,6 +153,84 @@ function TwoFactorSection({ user }: { user: SessionUser }) {
             </div>
             <Button type="submit" size="sm" disabled={setup.isPending}>Set up</Button>
           </div>
+        </form>
+      )}
+    </Section>
+  );
+}
+
+/** A six digit code by email at every password sign-in, for accounts without an authenticator app. */
+function EmailCheckSection({ user }: { user: SessionUser }) {
+  const qc = useQueryClient();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const setUser = (emailCheck: string | null) => qc.setQueryData<SessionUser | null>(["session"], (s) => (s ? { ...s, emailCheck } : s));
+  const start = useMutation({
+    mutationFn: () => post<{ sentTo: string }>("/auth/email-check/start", { email, currentPassword: password }),
+    onSuccess: (r) => {
+      setSentTo(r.sentTo);
+      setPassword("");
+    },
+    onError: (err) => toast.error((err as Error).message),
+  });
+  const confirm = useMutation({
+    mutationFn: () => post<{ emailCheck: string }>("/auth/email-check/confirm", { code }),
+    onSuccess: (r) => {
+      setUser(r.emailCheck);
+      setSentTo(null);
+      setCode("");
+      setEmail("");
+      toast.success("Sign-in codes will be sent to that mailbox");
+    },
+    onError: (err) => toast.error((err as Error).message),
+  });
+  const disable = useMutation({
+    mutationFn: () => post("/auth/email-check/disable", { currentPassword: password }),
+    onSuccess: () => {
+      setUser(null);
+      setPassword("");
+    },
+    onError: (err) => toast.error((err as Error).message),
+  });
+
+  return (
+    <Section title="Sign-in code by email">
+      {user.totpEnabled && <p className="text-muted-foreground">Not used while two-factor authentication with an authenticator app is on: that takes its place.</p>}
+      {user.emailCheck ? (
+        <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); disable.mutate(); }}>
+          <p className="flex items-center gap-2 text-green-700 dark:text-green-400"><MailCheck className="size-4" /> On. A password sign-in also needs the code sent to {user.emailCheck}. A passkey sign-in does not.</p>
+          <div className="flex items-end gap-2">
+            <div className="flex-1 space-y-1.5">
+              <Label htmlFor="ec-pw">Password, to turn it off</Label>
+              <Input id="ec-pw" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+            </div>
+            <Button type="submit" variant="outline" size="sm" disabled={disable.isPending}>Turn off</Button>
+          </div>
+        </form>
+      ) : sentTo ? (
+        <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); confirm.mutate(); }}>
+          <div className="flex-1 space-y-1.5">
+            <Label htmlFor="ec-code">Code sent to {sentTo}</Label>
+            <Input id="ec-code" inputMode="numeric" autoComplete="one-time-code" maxLength={7} required value={code} onChange={(e) => setCode(e.target.value)} />
+          </div>
+          <Button type="submit" size="sm" disabled={confirm.isPending}>Confirm</Button>
+        </form>
+      ) : (
+        <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); start.mutate(); }}>
+          <p className="text-muted-foreground">Off. When on, signing in with the password also needs a six digit code sent to a mailbox outside this system, such as your Outlook address.</p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="ec-email">Send codes to</Label>
+              <Input id="ec-email" type="email" autoComplete="email" autoCapitalize="none" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@outlook.com" />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="ec-pw">Password</Label>
+              <Input id="ec-pw" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+            </div>
+          </div>
+          <Button type="submit" size="sm" disabled={start.isPending}>{start.isPending && <Loader2 className="animate-spin" />} Send a code to confirm</Button>
         </form>
       )}
     </Section>
@@ -331,6 +409,7 @@ export default function SettingsDialog({ user, onClose }: { user: SessionUser; o
         </DialogHeader>
         <div className="min-w-0 space-y-5">
           <PasskeysSection />
+          <EmailCheckSection user={user} />
           <PasswordSection />
           <TwoFactorSection user={user} />
           <SessionsSection />

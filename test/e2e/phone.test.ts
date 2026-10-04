@@ -90,10 +90,39 @@ test('mailboxes screen and swipe to delete', async () => {
   await page.waitForFunction((n) => document.querySelectorAll('[role=option]').length === n - 1, {}, before);
 });
 
-test('files page fits a phone', async () => {
-  await page.goto(`${e2e.base}/files`, { waitUntil: 'networkidle0' });
-  await page.waitForFunction(() => document.body.innerText.includes('Upload'));
+test('the tab bar reaches Files and Codes in one tap; Files can take a photo', async () => {
+  await page.goto(`${e2e.base}/mail`, { waitUntil: 'networkidle0' });
+  await page.waitForSelector('nav[aria-label=Sections]');
+  await press(page, 'nav[aria-label=Sections] a', 'Files', tap);
+  await page.waitForFunction(() => location.pathname === '/files' && document.body.innerText.includes('Upload'));
   assert.equal(await overflowsSideways(), false);
+  // the camera button drives a capture input, which on a phone opens the camera directly
+  const capture = await page.$eval('input[aria-label="Take a photo"]', (i) => [(i as HTMLInputElement).accept, i.getAttribute('capture')]);
+  assert.deepEqual(capture, ['image/*', 'environment']);
+  assert.ok(await page.$('button[aria-label="Take a photo"]'));
+
+  // a "photo" goes straight into the list under a dated name
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const shot = `${os.tmpdir()}/image.jpg`;
+  fs.writeFileSync(shot, Buffer.from('/9j/4AAQSkZJRgABAQ', 'base64'));
+  const input = await page.$('input[aria-label="Take a photo"]');
+  await (input as unknown as { uploadFile(p: string): Promise<void> }).uploadFile(shot);
+  await page.waitForFunction(() => /Photo \d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2}\.jpg/.test(document.body.innerText));
+
+  await press(page, 'nav[aria-label=Sections] a', 'Codes', tap);
+  await page.waitForFunction(() => location.pathname === '/codes' && document.body.innerText.includes('Add account'));
+  assert.equal(await overflowsSideways(), false);
+  await press(page, 'button', 'Add account', tap);
+  assert.deepEqual(await page.$eval('input[aria-label="Take a picture of a QR code"]', (i) => [(i as HTMLInputElement).accept, i.getAttribute('capture')]), ['image/*', 'environment']);
+  await page.keyboard.press('Escape');
+
+  await press(page, 'nav[aria-label=Sections] a', 'Mail', tap);
+  await page.waitForFunction(() => location.pathname === '/mail');
+  // the account menu is the last tab
+  await pressLabel(page, 'Account', tap);
+  assert.match(await bodyText(page), /Mail settings/);
+  await page.keyboard.press('Escape');
 });
 
 test('no script errors or Content-Security-Policy violations along the way', () => {

@@ -304,3 +304,40 @@ create unique index if not exists webmail_users_email_lower on webmail_users (lo
 -- Key for signing image-proxy links (generated on first use). A link is only valid for the exact
 -- image address it was issued for.
 alter table mail_settings add column if not exists proxy_secret text;
+
+-- ---------------------------------------------------------------------------------------------
+-- Authenticator: one-time-code secrets for OTHER services, kept per user. The secret is stored
+-- encrypted (AES-256-GCM) with a key that lives in SSM, not in this database, so a copy of the
+-- database or of a backup does not contain usable secrets.
+-- ---------------------------------------------------------------------------------------------
+create table if not exists totp_entries (
+    id         bigint generated always as identity primary key,
+    user_id    int not null,
+    issuer     text not null default '',
+    account    text not null default '',
+    secret_enc bytea not null,                    -- iv (12) | auth tag (16) | ciphertext
+    algorithm  text not null default 'SHA1' check (algorithm in ('SHA1', 'SHA256', 'SHA512')),
+    digits     int not null default 6 check (digits between 6 and 8),
+    period     int not null default 30 check (period between 10 and 300),
+    created_at timestamptz not null default now()
+);
+create index if not exists totp_entries_user on totp_entries (user_id, id);
+
+-- ---------------------------------------------------------------------------------------------
+-- Sign-in check by email: a six digit code sent to a mailbox OUTSIDE this system.
+-- ---------------------------------------------------------------------------------------------
+alter table webmail_users add column if not exists verify_email text;
+create table if not exists login_challenges (
+    id         uuid primary key,
+    user_id    int not null,
+    purpose    text not null check (purpose in ('login', 'set_email')),
+    email      text not null,                     -- where the code was sent
+    code_hash  bytea not null,                    -- sha256 of the code
+    attempts   int not null default 0,
+    created_at timestamptz not null default now(),
+    expires_at timestamptz not null
+);
+create index if not exists login_challenges_user on login_challenges (user_id, created_at desc);
+
+-- how a session was started: a fresh password sign-in may add a passkey without retyping the password
+alter table webmail_sessions add column if not exists method text not null default 'password';

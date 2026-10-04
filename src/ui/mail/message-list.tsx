@@ -238,7 +238,7 @@ export function MessageList({
     return <div className="text-muted-foreground flex flex-1 items-center justify-center px-6 text-center text-sm">{emptyText}</div>;
   }
   return (
-    <div role="listbox" aria-label="Messages" aria-multiselectable={!mobile} className={cn("scroll-thin min-h-0 flex-1 overflow-y-auto", mobile ? "overscroll-y-contain pb-safe" : "py-1.5")}>
+    <div role="listbox" aria-label="Messages" aria-multiselectable={!mobile} className={cn("scroll-thin min-h-0 flex-1 overflow-y-auto", mobile ? "overscroll-y-contain" : "py-1.5")}>
       {messages.map((m, i) => (
         <div key={m.id}>
           {mobile ? (

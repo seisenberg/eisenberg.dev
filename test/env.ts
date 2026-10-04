@@ -1,4 +1,5 @@
 // Imported first by every test file: the server reads its configuration at import time.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,3 +15,4 @@ process.env.FILES_LOCAL_DIR = path.join(tmp, 'files');
 const vapid = webpush.generateVAPIDKeys();
 process.env.VAPID_PUBLIC_KEY = vapid.publicKey;
 process.env.VAPID_PRIVATE_KEY = vapid.privateKey;
+process.env.VAULT_KEY = crypto.randomBytes(32).toString('base64');
