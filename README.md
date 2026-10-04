@@ -104,6 +104,12 @@ shows how much mail it holds. **Blocking** an address drops everything sent to i
 the answer to an alias that has leaked. Mail is always stored and shown in the webmail unless the
 address is blocked, so the installed app with notifications can replace forwarding altogether.
 
+An address can also forward to **its own mailboxes** instead of the default one, for example
+`billing@` to the bookkeeper, or `team@` to three people. That makes the address a small group:
+everyone on the list receives the forward, and any of them can reply from their own mailbox. The
+reply goes out from the address itself, and none of their private addresses is shown. Set it from
+the menu on an address (**Forward to other mailboxes**).
+
 | | |
 | --- | --- |
 | ![Per-address rules, notes and a blocked address](docs/screenshots/rules.png) | ![Filters and signature](docs/screenshots/filters.png) |

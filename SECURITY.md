@@ -104,8 +104,14 @@ always served as downloads with `Content-Disposition: attachment`, `nosniff` and
 A relayed reply is the one place a mistake would expose your private mailbox, so it is the most
 defended and the most tested part (about 250 tests in `py/tests`).
 - A reply is relayed only if the token exists, the From header holds exactly one address which is
-  in `OWNER_ADDRESSES`, two different parsers and SES's own parse agree on that address, SES reports
-  DMARC `PASS`, and it is not an auto-reply or bounce.
+  in `OWNER_ADDRESSES` or is one of the mailboxes that very forward was sent to, two different
+  parsers and SES's own parse agree on that address, SES reports DMARC `PASS`, and it is not an
+  auto-reply or bounce.
+- An address can forward to its own list of outside mailboxes (a group). Only the owner can set
+  that list, and a member never sees it. A mailbox on a domain this system receives for is refused
+  (it would loop). Being on one address's list gives no right to answer mail that was forwarded
+  for another address. Every mailbox on any list counts as private: all of them are scrubbed from
+  a relayed reply and checked for by the final scan.
 - The outgoing message is rebuilt. Only the body survives. Every header from your mail client is
   dropped (Received, originating IP, mailer, message id, DKIM signature).
 - Your private address and the relay address are replaced inside quoted text, in every encoding.
@@ -114,7 +120,9 @@ defended and the most tested part (about 250 tests in `py/tests`).
 - Signed or encrypted replies cannot be rewritten safely and are refused with a notice.
 
 Residual risks to be aware of: whoever controls your private mailbox can write as your aliases to
-people who already wrote to them. Your name, signature and time zone are not rewritten. Metadata
+people who already wrote to them. The same holds for each mailbox on an address's forward list,
+for the mail that was forwarded to it, and it stays true for that mail after the mailbox is taken
+off the list. The people on one list see each other's addresses on the forward. Your name, signature and time zone are not rewritten. Metadata
 inside attachments (photo EXIF, document properties) is not inspected. Relay tokens do not expire.
 
 ### Installed web app and push notifications

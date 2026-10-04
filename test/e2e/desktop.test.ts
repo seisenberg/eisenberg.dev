@@ -204,6 +204,20 @@ test('addresses: forward, forward style, note and block', async () => {
   assert.equal(rules.find((r) => r.address === 'github@eisenberg.dev')!.forwardStyle, 'attach');
   assert.equal(rules.find((r) => r.address === 'bank@eisenberg.dev')!.forwardStyle, 'inline');
   assert.equal(rules.find((r) => r.address === 'shopping@eisenberg.dev')!.blocked, true);
+
+  // an address that forwards to a group of outside mailboxes instead of the default one
+  e2e.promptAnswers.push('Ann@Partners.example, raj@elsewhere.example');
+  await pressLabel(page, 'More for legal@harborlight.example');
+  await press(page, '[role=menuitem]', 'Forward to other mailboxes');
+  await page.waitForFunction(() => document.body.innerText.includes('Forwards to ann@partners.example, raj@elsewhere.example'));
+  await sleep(300);
+  const legal = await page.evaluate(async () => ((await (await fetch('/api/mail/rules')).json()).rules as { address: string; forwardTo: string[] }[]).find((r) => r.address === 'legal@harborlight.example')!);
+  assert.deepEqual(legal.forwardTo, ['ann@partners.example', 'raj@elsewhere.example']);
+  // leaving the prompt empty goes back to the default mailbox
+  e2e.promptAnswers.push('');
+  await pressLabel(page, 'More for legal@harborlight.example');
+  await press(page, '[role=menuitem]', 'Change who it forwards to');
+  await page.waitForFunction(() => !document.body.innerText.includes('Forwards to ann@partners.example'));
   await page.keyboard.press('Escape');
 });
 

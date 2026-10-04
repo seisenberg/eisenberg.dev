@@ -3,6 +3,7 @@ there are no secrets, hostnames or addresses in code.
 
 Required
     FORWARD_TO              comma list: the owner's private mailbox(es) forwards are sent to
+                            (the default; address_rules.forward_to gives an address its own list)
     MAIL_BUCKET             S3 bucket the SES receipt rule stores raw mail in
     POSTGRES_DB_HOST        database host (with a tunnel: the host as seen FROM the SSH server,
                             usually 127.0.0.1)

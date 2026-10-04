@@ -173,6 +173,13 @@ do $$ begin
     alter table address_rules add constraint address_rules_forward_style_check check (forward_style in ('inline', 'attach'));
 exception when duplicate_object then null; end $$;
 
+-- Where an address forwards to. null: the deployment's FORWARD_TO (the owner's private mailbox).
+-- A list makes the address a small group: every mailbox in it receives the forward, and each of
+-- them may answer through the reply relay. relay_tokens.forwarded_to records who a particular
+-- forward went to, which is who may answer it.
+alter table address_rules add column if not exists forward_to text[];
+alter table relay_tokens add column if not exists forwarded_to text[];
+
 -- Web Push subscriptions of the owner's browsers / installed web apps (written by the node backend,
 -- read by both lambdas). Rows are removed when the push service reports the subscription gone.
 create table if not exists push_subscriptions (

@@ -411,20 +411,35 @@ class Database:
 
     def create_token(self, *, token: str, inbox_message_id: Optional[str], alias_address: str,
                      correspondent: str, correspondent_name: Optional[str], orig_message_id: Optional[str],
-                     orig_references: Optional[str], subject: Optional[str]) -> None:
+                     orig_references: Optional[str], subject: Optional[str],
+                     forwarded_to: Optional[Sequence[str]] = None) -> None:
+        """`forwarded_to`: the mailboxes the forward is sent to; they may answer through the relay."""
         self._run(
             "insert into relay_tokens (token, inbox_message_id, alias_address, correspondent, "
-            "correspondent_name, orig_message_id, orig_references, subject) "
-            "values (%s, %s, %s, %s, %s, %s, %s, %s) on conflict (token) do nothing",
+            "correspondent_name, orig_message_id, orig_references, subject, forwarded_to) "
+            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s) on conflict (token) do nothing",
             [token, inbox_message_id, alias_address, correspondent, correspondent_name,
-             orig_message_id, orig_references, subject],
+             orig_message_id, orig_references, subject, list(forwarded_to) if forwarded_to else None],
             fetch=False,
         )
+
+    def set_token_targets(self, token: str, forwarded_to: Sequence[str]) -> None:
+        """A retried forward reuses its token; the mailboxes it goes to are those of the retry."""
+        self._run("update relay_tokens set forwarded_to = %s where token = %s", [list(forwarded_to), token], fetch=False)
+
+    def all_forward_targets(self, limit: int = 500) -> List[str]:
+        """Every mailbox any address rule forwards to (private addresses a relayed reply must not show)."""
+        rows = self._run(
+            "select distinct lower(target) as target from address_rules, unnest(forward_to) as target "
+            "where forward_to is not null limit %s",
+            [int(limit)],
+        )
+        return [row["target"] for row in rows]
 
     def get_token(self, token: str) -> Optional[Mapping[str, Any]]:
         rows = self._run(
             "select token, inbox_message_id, alias_address, correspondent, correspondent_name, "
-            "orig_message_id, orig_references, subject from relay_tokens where token = %s",
+            "orig_message_id, orig_references, subject, forwarded_to from relay_tokens where token = %s",
             [token],
         )
         return rows[0] if rows else None
@@ -433,7 +448,7 @@ class Database:
         """Token created for a stored inbound message (used when a failed forward is retried)."""
         rows = self._run(
             "select token, inbox_message_id, alias_address, correspondent, correspondent_name, "
-            "orig_message_id, orig_references, subject from relay_tokens "
+            "orig_message_id, orig_references, subject, forwarded_to from relay_tokens "
             "where inbox_message_id = %s order by created_at limit 1",
             [inbox_message_id],
         )
@@ -453,7 +468,7 @@ class Database:
         }
 
     def resolve_address_rule(self, address: str) -> Mapping[str, Any]:
-        """Rule of a receiving address: {"forward", "notify", "forward_style"}. Created from the
+        """Rule of a receiving address: {"forward", "notify", "forward_style", "forward_to"}. Created from the
         current defaults the first time the address receives mail (later changes of the defaults
         do not touch existing rows)."""
         self._run(
@@ -463,13 +478,15 @@ class Database:
             [address],
             fetch=False,
         )
-        rows = self._run("select forward, notify, forward_style from address_rules where address = %s", [address])
+        rows = self._run("select forward, notify, forward_style, forward_to from address_rules where address = %s", [address])
         if not rows:  # mail_settings has no row: nothing was materialised
             return dict(NO_SETTINGS_RULE)
         return {
             "forward": bool(rows[0]["forward"]),
             "notify": bool(rows[0]["notify"]),
             "forward_style": rows[0]["forward_style"],
+            # None: the deployment's FORWARD_TO. A list: these mailboxes instead.
+            "forward_to": list(rows[0].get("forward_to") or []) or None,
         }
 
     # -- web push ------------------------------------------------------------------------------

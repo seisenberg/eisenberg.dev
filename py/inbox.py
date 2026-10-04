@@ -11,7 +11,7 @@ Per SES record:
   everything else                -> stored as kind='inbound'; then, depending on the delivery
                                     rules of the receiving address(es) (address_rules, created
                                     from mail_settings on first mail):
-                                      forward on -> relay token created, forwarded to FORWARD_TO
+                                      forward on -> relay token created, forwarded to the address's mailboxes (default FORWARD_TO)
                                                     in that address's style (inline | attach)
                                       notify on  -> Web Push to every push_subscriptions row
                                     Mail is always stored, whatever the rules say.
@@ -42,6 +42,7 @@ BOUNCE_EXPLANATION = "Unauthenticated email is not accepted due to the sending d
 _SIZE_ERROR_RE = re.compile(r"message (?:length|size)|length is more than|too (?:large|long|big)|entity too large", re.I)
 _NOT_SIZE_CODES = frozenset({"throttling", "throttlingexception", "limitexceededexception", "toomanyrequestsexception"})
 SIZE_FALLBACK_MIN_BYTES = 1_000_000
+MAX_FORWARD_TARGETS = 50  # SES takes at most 50 recipients in one message
 
 _singletons: dict = {}
 
@@ -219,18 +220,21 @@ class Processor:
         relay_rcpt = relay.find_relay_recipient(recipients, self.cfg.mail_domains)
         if relay_rcpt is not None:
             token, relay_addr = relay_rcpt
+            token_row = None
             if replay:
                 # The DMARC evidence was reconstructed from the stored message, it is not SES's
                 # own event: a replayed message is never trusted as an owner reply.
                 reason: Optional[str] = "replayed message"
             else:
-                common_from = (mail.get("commonHeaders") or {}).get("from")
-                reason = relay.relay_refusal_reason(msg, receipt, self.cfg.owner_addresses, ses_from=common_from)
-            token_row = None
-            if reason is None:
                 token_row = self.db.get_token(token)
                 if token_row is None:
                     reason = "unknown token"
+                else:
+                    # Who may answer: the owner, and the mailboxes this very forward was sent to
+                    # (an address that forwards to a group).
+                    allowed = tuple(self.cfg.owner_addresses) + tuple(token_row.get("forwarded_to") or ())
+                    common_from = (mail.get("commonHeaders") or {}).get("from")
+                    reason = relay.relay_refusal_reason(msg, receipt, allowed, ses_from=common_from)
             if reason is None:
                 return self._relay(message_id, notification, raw, relay_addr, token_row)
             log.warning("record %s: relay refused (%s); handling as normal inbound", message_id, reason)
@@ -293,7 +297,7 @@ class Processor:
             if "forwarded" in meta and "notified" in meta:
                 return "duplicate"
 
-        want_forward, want_notify, style = self._delivery(recipients)
+        want_forward, want_notify, style, targets = self._delivery(recipients)
 
         forward_error: Optional[BaseException] = None
         if "forwarded" in meta:
@@ -304,7 +308,7 @@ class Processor:
         else:
             try:
                 outcome = self._forward(message_id, raw, msg, recipients, alias, domain, style,
-                                        reuse_token=not inserted)
+                                        reuse_token=not inserted, targets=targets)
                 self.db.merge_inbox_meta(message_id, {"forwarded": True})
             except Exception as exc:  # still notify (the mail is stored), then fail the record
                 forward_error = exc
@@ -320,8 +324,12 @@ class Processor:
             raise forward_error
         return outcome
 
-    def _delivery(self, recipients) -> Tuple[bool, bool, str]:
-        """(forward, notify, forward style) for a normal inbound message.
+    def _delivery(self, recipients) -> Tuple[bool, bool, str, Tuple[str, ...]]:
+        """(forward, notify, forward style, mailboxes to forward to) for a normal inbound message.
+
+        The mailboxes are those of every recipient whose rule forwards: the rule's own list, or
+        FORWARD_TO when it has none. One forward goes to all of them together.
+
 
         forward / notify are true when ANY of our recipients' rules says so. Each ordinary address
         gets its rule row from the current defaults the first time it receives mail; relay-shaped
@@ -344,7 +352,20 @@ class Processor:
             rules.append(self.db.get_mail_defaults())
         forwarding = [rule for rule in rules if rule["forward"]]
         style = relay.normalize_forward_style(forwarding[0].get("forward_style")) if forwarding else "inline"
-        return bool(forwarding), any(rule["notify"] for rule in rules), style
+        return bool(forwarding), any(rule["notify"] for rule in rules), style, self._targets(forwarding)
+
+    def _targets(self, forwarding) -> Tuple[str, ...]:
+        """The mailboxes a forward goes to. Never one of our own receiving addresses (that would
+        loop), never more than SES takes in one message; FORWARD_TO when nothing usable is left."""
+        wanted: List[str] = []
+        for rule in forwarding:
+            wanted.extend(rule.get("forward_to") or self.cfg.forward_to)
+        domains = self.cfg.mail_domains
+        usable = []
+        for address in dict.fromkeys(str(a).strip().lower() for a in wanted):
+            if relay.is_plain_address(address) and not (domains and relay.domain_of(address) in domains):
+                usable.append(address)
+        return tuple(usable[:MAX_FORWARD_TARGETS]) or tuple(self.cfg.forward_to)
 
     def _notify_step(self, message_id, msg, alias, domain, want_notify, recipients=()) -> None:
         """Web Push. Nothing in here may fail the record or hold up the forward."""
@@ -373,13 +394,16 @@ class Processor:
         except Exception as exc:
             log.error("record %s: push step failed (%s); continuing", message_id, type(exc).__name__)
 
-    def _forward(self, message_id, raw, msg, recipients, alias, domain, style, reuse_token) -> str:
+    def _forward(self, message_id, raw, msg, recipients, alias, domain, style, reuse_token, targets=None) -> str:
+        targets = tuple(targets or self.cfg.forward_to)
         sender = f"noreply@{domain}"
         correspondent = relay.extract_correspondent(msg) if alias else None
         if correspondent is not None:
             existing = self.db.find_token_for_message(message_id) if reuse_token else None
             if existing is not None:
                 token = existing["token"]
+                if list(existing.get("forwarded_to") or ()) != list(targets):
+                    self.db.set_token_targets(token, targets)
             else:
                 token = self._new_token()
                 references = relay.message_ids(" ".join(relay.header_values(msg, "References"))) or relay.message_ids(
@@ -394,13 +418,14 @@ class Processor:
                     orig_message_id=(relay.message_ids(relay.header_value(msg, "Message-ID", "")) or [None])[0],
                     orig_references=" ".join(references) or None,
                     subject=relay.clean_header_text(relay.header_value(msg, "Subject", "")) or None,
+                    forwarded_to=targets,
                 )
             sender = relay.relay_address(token, domain)
         else:
             log.warning("record %s: no usable alias/sender address; forwarding without a relay token", message_id)
 
         params = relay.ForwardParams(
-            forward_to=self.cfg.forward_to,
+            forward_to=targets,
             alias=alias or (recipients[0] if recipients else f"unknown@{domain}"),
             sender=sender,
             recipients=recipients,
@@ -409,12 +434,12 @@ class Processor:
         )
         data = relay.build_forward(raw, params, style)
         try:
-            self._send(sender, self.cfg.forward_to, data)
+            self._send(sender, targets, data)
         except Exception as exc:
             if not _is_size_error(exc, len(data)):
                 raise
             log.warning("record %s: forward rejected for size (%d bytes); sending notice", message_id, len(data))
-            self._send(sender, self.cfg.forward_to, relay.build_too_large_notice(raw, params))
+            self._send(sender, targets, relay.build_too_large_notice(raw, params))
             return "forwarded_notice"
         return "forwarded"
 
@@ -425,11 +450,21 @@ class Processor:
 
         alias = token_row["alias_address"]
         correspondent = token_row["correspondent"]
+        # Nothing on the private side may show in what goes out: the owner's addresses, the
+        # mailboxes this forward went to, and every other mailbox an address forwards to (a quoted
+        # older message may name them).
+        group = tuple(token_row.get("forwarded_to") or ())
+        private = tuple(dict.fromkeys(
+            str(a).strip().lower()
+            for a in tuple(self.cfg.private_addresses) + group + tuple(self.db.all_forward_targets())
+            if a and str(a).strip()
+        ))
+        notice_to = group or tuple(self.cfg.forward_to)
         params = relay.RelayParams(
             alias_address=alias,
             correspondent=correspondent,
             relay_address=relay_addr,
-            private_addresses=self.cfg.private_addresses,
+            private_addresses=private,
             correspondent_name=token_row.get("correspondent_name"),
             orig_message_id=token_row.get("orig_message_id"),
             orig_references=token_row.get("orig_references"),
@@ -438,7 +473,7 @@ class Processor:
         )
         try:
             data = relay.build_relay_reply(raw, params)
-            relay.assert_no_leak(data, self.cfg.private_addresses, relay_addr, allow=(alias,))
+            relay.assert_no_leak(data, private, relay_addr, allow=(alias,))
         except Exception as exc:
             if isinstance(exc, relay.LeakError):
                 reason = str(exc)
@@ -446,14 +481,14 @@ class Processor:
                 reason = f"the reply could not be rewritten ({type(exc).__name__})"
             log.error("record %s: relay reply NOT sent: %s", message_id, reason)
             notice = relay.build_undelivered_notice(
-                forward_to=self.cfg.forward_to,
+                forward_to=notice_to,
                 domain=relay.domain_of(relay_addr),
                 correspondent=correspondent,
                 subject=token_row.get("subject"),
                 reason=reason,
                 now=self._now(),
             )
-            self._send(f"mailer-daemon@{relay.domain_of(relay_addr)}", self.cfg.forward_to, notice)
+            self._send(f"mailer-daemon@{relay.domain_of(relay_addr)}", notice_to, notice)
             return "relay_blocked"
 
         response = self._send(alias, [correspondent], data)

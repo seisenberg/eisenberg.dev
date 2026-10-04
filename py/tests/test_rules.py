@@ -541,3 +541,102 @@ def test_nothing_sensitive_is_logged(processor, s3, ses, db, send, caplog):
         processor.process_event({"Records": [deliver(processor, s3)[1]]})
     for secret in ("SECRET-PATH", "Hello about the bike", "Bob Smith", VAPID_KEY, "p256dh-key", "auth-secret", OWNER):
         assert secret not in caplog.text
+
+
+# ------------------------------------------------------------------------------------------
+# per-address forward targets (an address that forwards to a group)
+# ------------------------------------------------------------------------------------------
+ANN = "ann@partners.example"
+RAJ = "raj@elsewhere.example"
+TEAM = "team@eisenberg.dev"
+
+
+def group_reply(sender, relay_addr=RELAY1, quoted=""):
+    """A reply written in a group member's own mailbox, quoting the forward they received."""
+    text = (
+        "We can do Thursday.\n\n"
+        f"On Tue, Bob Smith via {TEAM} <{relay_addr}> wrote:\n"
+        f"> To: {ANN}, {RAJ}\n{quoted}"
+        "> Is the bike still available?\n"
+    )
+    return owner_reply(relay_addr, from_header=f"Member <{sender}>", text=text, html=f"<p>{text}</p>", attachment=None)
+
+
+def test_an_address_forwards_to_its_own_mailboxes_instead_of_the_default(processor, s3, ses, db, send):
+    db.set_rule(TEAM, forward_to=[ANN, RAJ])
+    outcome, _ = deliver(processor, s3, recipients=(TEAM,))
+    assert outcome == "forwarded"
+    (sent,) = ses.sent
+    assert sent["Destinations"] == [ANN, RAJ]
+    assert [a.addr_spec for a in relay.parse(sent["Data"])["To"].addresses] == [ANN, RAJ]
+    assert OWNER.encode() not in sent["Data"].lower()                    # the default mailbox is not involved
+    assert db.tokens[TOKEN1]["forwarded_to"] == [ANN, RAJ]
+    # an address without its own list still goes to the default
+    deliver(processor, s3, "in-2")
+    assert ses.sent[1]["Destinations"] == [OWNER]
+    assert db.tokens[f"{2:032x}"]["forwarded_to"] == [OWNER]
+
+
+def test_mail_to_several_addresses_goes_once_to_all_their_mailboxes(processor, s3, ses, db, send):
+    db.set_rule(TEAM, forward_to=[ANN, RAJ])
+    db.set_rule(OTHER, forward_to=[RAJ.upper()])
+    db.set_rule("quiet@eisenberg.dev", forward=False, forward_to=["never@private.example"])
+    deliver(processor, s3, recipients=(ALIAS, TEAM, OTHER, "quiet@eisenberg.dev"))
+    (sent,) = ses.sent
+    assert sent["Destinations"] == [OWNER, ANN, RAJ]                    # default for ALIAS, each mailbox once
+
+
+@pytest.mark.parametrize("bad", [
+    ["loop@eisenberg.dev"],                       # one of our own receiving addresses: a mail loop
+    ["ann@partners.example\nBcc: x@evil.example"],
+    ["not an address"],
+    [],
+])
+def test_unusable_targets_fall_back_to_the_default_mailbox(processor, s3, ses, db, send, bad):
+    db.set_rule(TEAM, forward_to=bad)
+    assert deliver(processor, s3, recipients=(TEAM,))[0] == "forwarded"
+    assert ses.sent[0]["Destinations"] == [OWNER]
+
+
+def test_a_group_member_can_answer_and_no_private_address_reaches_the_correspondent(processor, s3, ses, db, send):
+    db.set_rule(TEAM, forward_to=[ANN, RAJ])
+    db.set_rule(OTHER, forward_to=["third@private.example"])
+    deliver(processor, s3, recipients=(TEAM,))
+    ses.sent.clear()
+    quoted = "> Cc: third@private.example\n"
+    outcome, _ = deliver(processor, s3, "reply-in-1", group_reply(RAJ, quoted=quoted), recipients=(RELAY1,),
+                         from_header=f"Member <{RAJ}>")
+    assert outcome == "relayed"
+    (sent,) = ses.sent
+    assert sent["Source"] == TEAM and sent["Destinations"] == [BOB]
+    low = sent["Data"].lower()
+    for private in (ANN, RAJ, OWNER, "third@private.example"):
+        assert private.encode() not in low
+    assert b"we can do thursday" in low
+
+
+def test_only_the_mailboxes_a_forward_went_to_may_answer_it(processor, s3, ses, db, send):
+    db.set_rule(TEAM, forward_to=[ANN])
+    db.set_rule(OTHER, forward_to=[RAJ])
+    deliver(processor, s3, recipients=(TEAM,))                             # token 1: went to ANN only
+    ses.sent.clear()
+    # RAJ is a forward target of another address, not of this message
+    outcome, _ = deliver(processor, s3, "reply-in-1", group_reply(RAJ), recipients=(RELAY1,),
+                         from_header=f"Member <{RAJ}>")
+    assert outcome == "forwarded"                                         # refused: handled as ordinary inbound
+    assert ses.to(BOB) == []
+    assert db.tokens[TOKEN1]["use_count"] == 0
+    # the owner can always answer, also for a group address
+    ses.sent.clear()
+    outcome, _ = deliver(processor, s3, "reply-in-2", owner_reply(RELAY1), recipients=(RELAY1,),
+                         from_header=f"Owner Private <{OWNER_MIXED}>")
+    assert outcome == "relayed" and ses.sent[0]["Destinations"] == [BOB]
+
+
+def test_a_group_member_needs_dmarc_pass_like_the_owner(processor, s3, ses, db, send):
+    db.set_rule(TEAM, forward_to=[ANN])
+    deliver(processor, s3, recipients=(TEAM,))
+    ses.sent.clear()
+    outcome, _ = deliver(processor, s3, "reply-in-1", group_reply(ANN), recipients=(RELAY1,),
+                         from_header=f"Member <{ANN}>", dmarc="FAIL")
+    assert outcome != "relayed" and ses.to(BOB) == []

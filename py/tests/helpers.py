@@ -382,14 +382,22 @@ class FakeDB:
                    for r in self.inbox.values())
 
     def create_token(self, *, token, inbox_message_id, alias_address, correspondent, correspondent_name,
-                     orig_message_id, orig_references, subject):
+                     orig_message_id, orig_references, subject, forwarded_to=None):
         self._maybe_fail("create_token")
         assert inbox_message_id in self.inbox, "relay_tokens.inbox_message_id references lambda_inbox"
         self.tokens.setdefault(token, dict(
             token=token, inbox_message_id=inbox_message_id, alias_address=alias_address,
             correspondent=correspondent, correspondent_name=correspondent_name,
             orig_message_id=orig_message_id, orig_references=orig_references, subject=subject,
+            forwarded_to=list(forwarded_to) if forwarded_to else None,
             last_used_at=None, use_count=0))
+
+    def set_token_targets(self, token, forwarded_to):
+        self.tokens[token]["forwarded_to"] = list(forwarded_to)
+
+    def all_forward_targets(self, limit=500):
+        seen = dict.fromkeys(t.lower() for rule in self.address_rules.values() for t in (rule.get("forward_to") or ()))
+        return list(seen)[:limit]
 
     def get_token(self, token):
         row = self.tokens.get(token)
@@ -423,9 +431,11 @@ class FakeDB:
         rule = self.address_rules.get(address)
         return dict(rule) if rule else {"forward": True, "notify": True, "forward_style": "inline"}
 
-    def set_rule(self, address, forward=True, notify=True, forward_style="inline"):
+    def set_rule(self, address, forward=True, notify=True, forward_style="inline", forward_to=None):
         """What the webmail does when the owner edits an address."""
         self.address_rules[address] = {"forward": forward, "notify": notify, "forward_style": forward_style}
+        if forward_to:
+            self.address_rules[address]["forward_to"] = list(forward_to)
 
     # -- blocked addresses, delivery log, reconcile --
     def block(self, address):

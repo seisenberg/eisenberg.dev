@@ -40,7 +40,7 @@ Parameters:
     Description: Domains to receive for and send from, e.g. "eisenberg.dev,example-llc.com". Each must be a verified SES identity.
   ForwardTo:
     Type: String
-    Description: Your private mailbox. Forwards go here, and replies from it are relayed.
+    Description: Your private mailbox. Forwards go here unless an address has its own list (set in the webmail), and replies from it are relayed.
     AllowedPattern: "^[^@\\s,]+@[^@\\s,]+\\.[^@\\s,]+$"
   OwnerAddresses:
     Type: String

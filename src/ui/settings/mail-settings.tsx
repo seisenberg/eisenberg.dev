@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ban, BellOff, BellRing, Ellipsis, Loader2, Share, Smartphone, Trash2, X } from "lucide-react";
+import { Ban, BellOff, BellRing, Ellipsis, Loader2, Share, Smartphone, Trash2, Users, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -161,13 +161,13 @@ function RulesSection({ owner }: { owner: boolean }) {
   const update = (fn: (d: DeliveryRules) => DeliveryRules) => qc.setQueryData<DeliveryRules>(["rules"], (d) => (d ? fn(d) : d));
   const settle = { onError: (err: unknown) => toast.error((err as Error).message), onSettled: () => qc.invalidateQueries({ queryKey: ["rules"] }) };
   const setRule = useMutation({
-    mutationFn: (v: { address: string; forward?: boolean; notify?: boolean; forwardStyle?: ForwardStyle; blocked?: boolean; note?: string }) => post("/mail/rules", v),
+    mutationFn: (v: { address: string; forward?: boolean; notify?: boolean; forwardStyle?: ForwardStyle; forwardTo?: string[]; blocked?: boolean; note?: string }) => post("/mail/rules", v),
     onMutate: (v) =>
       update((d) => ({
         ...d,
         rules: d.rules.map((r) =>
           r.address === v.address
-            ? { ...r, forward: v.forward ?? r.forward, notify: v.notify ?? r.notify, forwardStyle: v.forwardStyle ?? r.forwardStyle, blocked: v.blocked ?? r.blocked, note: v.note ?? r.note, explicit: true }
+            ? { ...r, forward: v.forward ?? r.forward, notify: v.notify ?? r.notify, forwardStyle: v.forwardStyle ?? r.forwardStyle, forwardTo: v.forwardTo ?? r.forwardTo, blocked: v.blocked ?? r.blocked, note: v.note ?? r.note, explicit: true }
             : r,
         ),
       })),
@@ -230,6 +230,12 @@ function RulesSection({ owner }: { owner: boolean }) {
                     {r.blocked && <span className="bg-destructive/15 text-destructive ml-2 rounded px-1.5 py-0.5 text-[11px] font-medium no-underline">Blocked{r.blockedCount ? ` · ${r.blockedCount} dropped` : ""}</span>}
                   </div>
                   {r.note && <div className="truncate text-xs italic" title={r.note}>{r.note}</div>}
+                  {r.forwardTo.length > 0 && (
+                    <div className={cn("text-primary truncate text-xs max-md:text-[13px] max-md:whitespace-normal max-md:wrap-anywhere", !r.forward && "opacity-60")} title={r.forwardTo.join(", ")}>
+                      <Users className="mr-1 inline size-3 align-[-1px]" aria-hidden />
+                      Forwards to {r.forwardTo.join(", ")}
+                    </div>
+                  )}
                   <div className="text-muted-foreground flex flex-wrap items-center gap-x-2 text-xs max-md:text-[13px]">
                     {!r.blocked && <StyleToggle style={r.forwardStyle} forward={r.forward} label={r.address} onChange={(forwardStyle) => setRule.mutate({ address: r.address, forwardStyle })} />}
                     {!r.blocked && <span aria-hidden>·</span>}
@@ -250,6 +256,19 @@ function RulesSection({ owner }: { owner: boolean }) {
                     >
                       {r.note ? "Edit note…" : "Add a note…"}
                     </DropdownMenuItem>
+                    {owner && (
+                      <DropdownMenuItem
+                        onSelect={() => {
+                          const answer = window.prompt(
+                            `Forward mail for ${r.address} to\n(one or more mailboxes outside this system, separated by commas; each can also reply as this address. Leave empty for your default mailbox.)`,
+                            r.forwardTo.join(", "),
+                          );
+                          if (answer !== null) setRule.mutate({ address: r.address, forwardTo: answer.split(/[\s,;]+/).map((a) => a.trim().toLowerCase()).filter(Boolean) });
+                        }}
+                      >
+                        {r.forwardTo.length ? "Change who it forwards to…" : "Forward to other mailboxes…"}
+                      </DropdownMenuItem>
+                    )}
                     {!owner ? null : r.blocked ? (
                       <DropdownMenuItem onSelect={() => setRule.mutate({ address: r.address, blocked: false })}>Unblock this address</DropdownMenuItem>
                     ) : (

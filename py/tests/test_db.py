@@ -255,7 +255,9 @@ def test_delivery_rule_and_push_statements():
     assert database.get_mail_defaults() == {"forward": False, "notify": True, "forward_style": "attach"}
     connect.rows = [{"forward": False, "notify": True, "forward_style": "attach"}]
     assert database.resolve_address_rule("a@eisenberg.dev") == {"forward": False, "notify": True,
-                                                               "forward_style": "attach"}
+                                                               "forward_style": "attach", "forward_to": None}
+    connect.rows = [{"forward": True, "notify": True, "forward_style": "inline", "forward_to": ["a@x.example", "b@y.example"]}]
+    assert database.resolve_address_rule("team@eisenberg.dev")["forward_to"] == ["a@x.example", "b@y.example"]
 
     connect.rows = [{"endpoint": "https://fcm.googleapis.com/x", "p256dh": "p", "auth": "a", "role": "owner",
                      "domains": None}]

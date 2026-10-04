@@ -193,6 +193,12 @@ export interface DeliveryRule {
   notify: boolean;
   /** how a forward is laid out: the original inline, or a summary with the original attached */
   forwardStyle: ForwardStyle;
+  /**
+   * Mailboxes this address forwards to instead of the default private mailbox. Each of them
+   * receives the forward and may answer it through the reply relay. Empty: the default mailbox.
+   * Only the owner sees and sets this (a member always gets an empty list).
+   */
+  forwardTo: string[];
   /** false: no rule stored yet, the values shown are the current defaults */
   explicit: boolean;
 }

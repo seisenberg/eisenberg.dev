@@ -427,6 +427,7 @@ when you set up two-factor there.
 | Get a shell on the database host | `aws ssm start-session --target $INSTANCE_ID` (find `INSTANCE_ID` as in step 8). You are `ssm-user` and can use `sudo` |
 | Rotate the database password | in that shell: `sudo ROTATE_DB_PASSWORD=1 /usr/local/sbin/eisenmail-db-host`. It stores the new password in SSM. The functions notice the old one is refused and read the new one |
 | Rotate the tunnel key | in that shell: `sudo ROTATE_TUNNEL_KEY=1 /usr/local/sbin/eisenmail-db-host`. Then rerun the Deploy workflow, so both functions start fresh and read the new key |
+| Forward an address to other people | account menu, **Mail settings**, the menu on the address, **Forward to other mailboxes**. Until SES production access is granted (step 9), each such mailbox must be verified as an identity like your own, or the forward fails |
 | Reset your sign-in | step 8 again, with `--email` as before. It also signs out every device, removes passkeys and switches two-factor off |
 | Locked out because the sign-in code does not arrive | step 8 again without `--email`: that switches the email check off. Sign in, then switch it on again under **Security and people** |
 | Database backups | automatic: a disk snapshot every day (kept 7 days) and a dump in S3 every night (kept 90 days). `aws s3 cp s3://$BACKUP_BUCKET/db/LATEST -` shows the newest. The alarm tells you if one is missed |

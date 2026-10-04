@@ -140,6 +140,15 @@ def domain_of(address: str) -> str:
     return address.rpartition("@")[2].lower()
 
 
+_PLAIN_ADDRESS_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?\.[A-Za-z]{2,}")
+
+
+def is_plain_address(address: str) -> bool:
+    """A bare addr-spec with nothing that could bend a header or an envelope (used for forward
+    targets read from the database)."""
+    return len(address) <= 254 and ".." not in address and _PLAIN_ADDRESS_RE.fullmatch(address) is not None
+
+
 def _raw_header_values(msg: Message, name: str) -> List[str]:
     name = name.lower()
     return [str(v) for k, v in msg.raw_items() if k.lower() == name]

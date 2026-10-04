@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { startLocalDb, type LocalDb } from '../scripts/local-db.js';
 import { DEV_DOMAINS, DEV_USER, seed, seedState } from '../scripts/seed.js';
-import type { MailboxTree, MessageDetail, MessageList } from '../src/shared/api.js';
+import type { DeliveryRules, MailboxTree, MessageDetail, MessageList } from '../src/shared/api.js';
 
 
 let local: LocalDb;
@@ -514,6 +514,26 @@ test('delivery rules: defaults for new addresses, per-address overrides', async 
   rules = (await call('GET', '/api/mail/rules')).json;
   assert.deepEqual(core(rules.rules.find((r: Json) => r.address === 'future@quartzworks.example')), { address: 'future@quartzworks.example', forward: false, notify: true, forwardStyle: 'attach', explicit: true });
 
+  // an address that forwards to its own mailboxes (a group) instead of the default one
+  const targetsOf = async (address: string) => ((await call('GET', '/api/mail/rules')).json as DeliveryRules).rules.find((r) => r.address === address)!.forwardTo;
+  assert.deepEqual(await targetsOf('github@eisenberg.dev'), []);
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'team@quartzworks.example', forwardTo: ['Ann@Partners.example', 'raj@elsewhere.example', 'ann@partners.example'] })).status, 204);
+  assert.deepEqual(await targetsOf('team@quartzworks.example'), ['ann@partners.example', 'raj@elsewhere.example']);
+  assert.deepEqual((await local.pool.query(`select forward_to from address_rules where address = 'team@quartzworks.example'`)).rows[0].forward_to, ['ann@partners.example', 'raj@elsewhere.example']);
+  // other changes leave the list alone; one string with separators works too; an empty list is "the default again"
+  await call('POST', '/api/mail/rules', { address: 'team@quartzworks.example', notify: false });
+  assert.deepEqual(await targetsOf('team@quartzworks.example'), ['ann@partners.example', 'raj@elsewhere.example']);
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'team@quartzworks.example', forwardTo: 'solo@partners.example; ' })).status, 204);
+  assert.deepEqual(await targetsOf('team@quartzworks.example'), ['solo@partners.example']);
+  for (const bad of [['loop@eisenberg.dev'], ['x@harborlight.example'], ['not-an-address'], ['a@b.example\r\nBcc: evil@x.example'], ['"quoted name" <a@b.example>'], Array.from({ length: 11 }, (_, i) => `m${i}@partners.example`), 7]) {
+    assert.equal((await call('POST', '/api/mail/rules', { address: 'team@quartzworks.example', forwardTo: bad })).status, 400, JSON.stringify(bad));
+  }
+  assert.deepEqual(await targetsOf('team@quartzworks.example'), ['solo@partners.example']);
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'team@quartzworks.example', forwardTo: [] })).status, 204);
+  assert.deepEqual(await targetsOf('team@quartzworks.example'), []);
+  assert.equal((await local.pool.query(`select forward_to from address_rules where address = 'team@quartzworks.example'`)).rows[0].forward_to, null);
+  await call('POST', '/api/mail/rules/reset', { address: 'team@quartzworks.example' });
+
   // block a leaked address and remember who it was given to
   assert.equal((await call('POST', '/api/mail/rules', { address: 'future@quartzworks.example', blocked: true, note: 'Given to  Acme\r\nnewsletter' })).status, 204);
   rules = (await call('GET', '/api/mail/rules')).json;
@@ -742,6 +762,18 @@ test('users: a member sees only the mail of their domains', async () => {
   assert.ok(list.messages.every((m) => m.addresses.length > 0 && m.addresses.every((a) => a.endsWith('@harborlight.example'))), 'addresses on other domains are not shown');
   // a message that also went to an address on another domain is visible, without that address
   assert.ok(list.messages.some((m) => m.subject.startsWith('Harborlight LLC: annual report')));
+
+  // where an address forwards to is the owner's business: a member neither sees nor sets it
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'billing@harborlight.example', forwardTo: ['books@accountant.example'] })).status, 204);
+  const memberRules: DeliveryRules = (await call('GET', '/api/mail/rules', undefined, asMember())).json;
+  assert.deepEqual(memberRules.rules.find((r) => r.address === 'billing@harborlight.example')!.forwardTo, []);
+  assert.ok(!JSON.stringify(memberRules).includes('accountant.example'));
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'billing@harborlight.example', forwardTo: ['pat@private.example'] }, asMember())).status, 403);
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'billing@harborlight.example', forwardTo: [] }, asMember())).status, 403);
+  // a member's own change to the same rule leaves the owner's list in place
+  assert.equal((await call('POST', '/api/mail/rules', { address: 'billing@harborlight.example', notify: false }, asMember())).status, 204);
+  assert.deepEqual(((await call('GET', '/api/mail/rules')).json as DeliveryRules).rules.find((r) => r.address === 'billing@harborlight.example')!.forwardTo, ['books@accountant.example']);
+  await call('POST', '/api/mail/rules/reset', { address: 'billing@harborlight.example' });
 
   // everything about another domain's mail is "not found" for the member
   const foreign = await first('mailbox=inbox&q=Fractional');

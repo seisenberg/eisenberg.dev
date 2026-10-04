@@ -65,8 +65,13 @@ def test_full_round_trip(database, ids):
                   orig_references="<r@x>", subject="Hello")
     database.create_token(**fields)
     database.create_token(**fields)        # idempotent
-    assert database.get_token(token) == fields
-    assert database.find_token_for_message(inbound_id) == fields
+    assert database.get_token(token) == {**fields, "forwarded_to": None}
+    assert database.find_token_for_message(inbound_id) == {**fields, "forwarded_to": None}
+    database.set_token_targets(token, ["ann@partners.example", "raj@elsewhere.example"])
+    assert database.get_token(token)["forwarded_to"] == ["ann@partners.example", "raj@elsewhere.example"]
+    group_token = token[:-1] + ("0" if token[-1] != "0" else "1")
+    database.create_token(**{**fields, "token": group_token, "forwarded_to": ("ann@partners.example",)})
+    assert database.get_token(group_token)["forwarded_to"] == ["ann@partners.example"]
     database.touch_token(token)
     database.touch_token(token)
 
@@ -99,28 +104,44 @@ def test_address_rules_are_materialised_from_the_defaults(database, ids):
     def rule(forward, notify, style):
         return {"forward": forward, "notify": notify, "forward_style": style}
 
+    def resolved(address):
+        found = dict(database.resolve_address_rule(address))
+        assert found.pop("forward_to", None) is None
+        return found
+
     with psycopg.connect(DSN, autocommit=True) as conn:
         saved = conn.execute("select default_forward, default_notify, default_forward_style from mail_settings").fetchone()
         try:
             conn.execute("update mail_settings set default_forward = true, default_notify = false, "
                          "default_forward_style = 'attach'")
             assert database.get_mail_defaults() == rule(True, False, "attach")
-            assert database.resolve_address_rule(first) == rule(True, False, "attach")
+            assert resolved(first) == rule(True, False, "attach")
 
             conn.execute("update mail_settings set default_forward = false, default_notify = true, "
                          "default_forward_style = 'inline'")
-            assert database.resolve_address_rule(first) == rule(True, False, "attach")     # existing row kept
-            assert database.resolve_address_rule(second) == rule(False, True, "inline")    # new row, new defaults
+            assert resolved(first) == rule(True, False, "attach")     # existing row kept
+            assert resolved(second) == rule(False, True, "inline")    # new row, new defaults
 
             conn.execute("update address_rules set forward = false, notify = false, forward_style = 'inline' "
                          "where address = %s", [first])
-            assert database.resolve_address_rule(first) == rule(False, False, "inline")    # webmail edit wins
+            assert resolved(first) == rule(False, False, "inline")    # webmail edit wins
+
+            # an address with its own mailboxes (a group); every such mailbox is known as private
+            conn.execute("update address_rules set forward_to = %s where address = %s",
+                         [[f"{ids}-ann@partners.example", f"{ids}-Raj@Elsewhere.example"], first])
+            conn.execute("update address_rules set forward_to = %s where address = %s",
+                         [[f"{ids}-ann@partners.example"], second])
+            assert database.resolve_address_rule(first)["forward_to"] == [f"{ids}-ann@partners.example",
+                                                                         f"{ids}-Raj@Elsewhere.example"]
+            mine = sorted(t for t in database.all_forward_targets(limit=100000) if t.startswith(ids))
+            assert mine == [f"{ids}-ann@partners.example", f"{ids}-raj@elsewhere.example"]
+            conn.execute("update address_rules set forward_to = null where address like %s", [ids + "%"])
 
             conn.execute("delete from mail_settings")                                      # "should not happen"
             assert database.get_mail_defaults() == rule(True, True, "inline")
-            assert database.resolve_address_rule(third) == rule(True, True, "inline")
+            assert resolved(third) == rule(True, True, "inline")
             assert conn.execute("select count(*) from address_rules where address = %s", [third]).fetchone() == (0,)
-            assert database.resolve_address_rule(second) == rule(False, True, "inline")
+            assert resolved(second) == rule(False, True, "inline")
         finally:
             conn.execute("delete from mail_settings")
             conn.execute("insert into mail_settings (id, default_forward, default_notify, default_forward_style) "

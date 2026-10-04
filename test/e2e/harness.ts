@@ -30,6 +30,8 @@ export interface E2E {
   images: { origin: string; requests: { path: string; headers: Record<string, unknown> }[] };
   /** Mail the system sent (nothing leaves the machine in tests). */
   outbox: { to: string[]; raw: string }[];
+  /** Answers for the next window.prompt() calls, in order (without one, a prompt keeps its default). */
+  promptAnswers: string[];
   stop(): Promise<void>;
 }
 
@@ -112,6 +114,7 @@ function finish(base: string, browser: Browser, db: LocalDb, server: Server, ima
     db,
     images,
     outbox,
+    promptAnswers: [],
     async stop() {
       await browser.close().catch(() => {});
       server.close();
@@ -132,7 +135,7 @@ export async function newPage(e2e: E2E, opts: { phone?: boolean } = {}): Promise
     // 401 from the "am I signed in" probe is expected; anything else on the error channel is not
     if (msg.type() === 'error' && !text.includes('401') && !text.includes('ERR_NAME_NOT_RESOLVED')) problems.push(text);
   });
-  page.on('dialog', (d) => void d.accept());
+  page.on('dialog', (d) => void d.accept(d.type() === 'prompt' ? e2e.promptAnswers.shift() : undefined));
   if (opts.phone) {
     await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1');
     await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
