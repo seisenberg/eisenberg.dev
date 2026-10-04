@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepares a fresh Ubuntu 24.04 host as the eisenmail database server:
+# Prepares a fresh Ubuntu 26.04 LTS host (PostgreSQL 18) as the eisenmail database server:
 #   - PostgreSQL listening on localhost only, one database, one application role,
 #     settings sized for a machine with 0.5 to 1 GB of memory
 #   - a "tunnel" account that can do exactly one thing: forward a port to that PostgreSQL
@@ -98,7 +98,7 @@ CONF
 # ---- packages -------------------------------------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
 PACKAGES=(postgresql openssh-server unattended-upgrades)
-# Ubuntu 24.04 has no aws CLI package, so the few AWS calls are made with python3 and boto3.
+# The few AWS calls are made with python3 and boto3 (small, and packaged by Ubuntu).
 [[ $MODE == aws ]] && PACKAGES+=(python3-boto3)
 # At first boot Ubuntu's own daily update job can hold the package locks for a while: wait for it.
 apt_get() { apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=5 "$@"; }

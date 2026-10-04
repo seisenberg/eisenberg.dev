@@ -45,9 +45,10 @@ Parameters:
       would want a new instance). To grow the disk later see docs/BACKUP-AND-MIGRATION.md.
   ImageId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
+    Default: /aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id
     Description: >-
-      Canonical's public parameter for the current Ubuntu 24.04 arm64 image. It is read again on
+      Canonical's public parameter for the current Ubuntu 26.04 LTS arm64 image (its PostgreSQL
+      is version 18). It is read again on
       every stack update, and a newer image would mean a NEW instance. The stack policy in
       docs/SETUP.md blocks that; the host keeps itself up to date with unattended-upgrades instead.
   GitHubRepository:
@@ -263,6 +264,12 @@ Resources:
             [[ $(public_ip) == "${ElasticIp.PublicIp}" ]] && break
             sleep 5
           done
+
+          # Session Manager is the only way onto this host. Canonical's images ship the agent
+          # as a snap; install it if this image does not.
+          if ! snap list amazon-ssm-agent >/dev/null 2>&1; then
+            snap install amazon-ssm-agent --classic || echo "eisenmail: could not install the SSM agent" >&2
+          fi
 
           url="https://raw.githubusercontent.com/${GitHubRepository}/${GitRef}/infra/db-host.sh"
           if ! curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/sbin/eisenmail-db-host "$url"; then

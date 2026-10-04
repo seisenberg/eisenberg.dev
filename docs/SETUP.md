@@ -171,7 +171,7 @@ PostgreSQL, automatic security updates, a snapshot of the disk every day, and a 
 the backup bucket every night. [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md) explains the
 backups and how to restore them.
 
-Alternative: any PostgreSQL 14 or later that you run yourself. In step 7 set
+Alternative: a PostgreSQL that you run yourself (the tests run on version 18; use 18 or later). In step 7 set
 `UseDatabaseStack=false`. For a server the functions reach over TLS (for example RDS), set `DbHost`
 to its endpoint and keep `DbSslMode=verify-full`. For your own machine behind an ssh tunnel, see
 "Running the database on your own hardware" in [BACKUP-AND-MIGRATION.md](BACKUP-AND-MIGRATION.md).

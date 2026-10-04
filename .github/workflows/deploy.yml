@@ -33,7 +33,7 @@ jobs:
     needs: test
     # Skipped until the AWS side exists (repository variable set in docs/SETUP.md step 4).
     if: ${{ vars.AWS_DEPLOY_ROLE_ARN != '' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     environment: production
     permissions:

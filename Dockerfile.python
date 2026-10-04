@@ -5,7 +5,7 @@
 #
 # Everything is configured through environment variables (see py/config.py). No secrets are
 # baked into the image: the SSH tunnel key is read from SSM at runtime (SSH_TUNNEL_KEY_SSM).
-FROM python:3.13-slim-bookworm AS python_runner
+FROM python:3.13-slim-trixie AS python_runner
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

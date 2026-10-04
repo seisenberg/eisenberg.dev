@@ -17,7 +17,7 @@ ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 ```
 
 How far these instructions have been tested: the dump and restore commands were run on
-Ubuntu 24.04 with PostgreSQL 16, exactly as written here. The commands that talk to AWS
+Ubuntu 26.04 with PostgreSQL 18, exactly as written here. The commands that talk to AWS
 (snapshots, replacing a disk, Session Manager) follow the AWS documentation but were written
 without an AWS account to try them in. The restore drill at the end is how you find out that
 they work for you, before the day you need them.
@@ -197,7 +197,7 @@ because at the end of its setup the fresh machine uploads a dump of its own, sti
 database, and from then on that one is the newest file in the bucket.
 
 ```bash
-IMAGE_ID=$(aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id --query Parameter.Value --output text)
+IMAGE_ID=$(aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id --query Parameter.Value --output text)
 ```
 
 ```bash
@@ -290,7 +290,7 @@ BUILT_FROM=$(aws cloudformation describe-stacks --stack-name eisenmail-database 
 ```
 
 ```bash
-aws ssm get-parameters-by-path --recursive --path /aws/service/canonical/ubuntu/server/24.04/stable --query "Parameters[?Value=='$BUILT_FROM'].Name" --output text
+aws ssm get-parameters-by-path --recursive --path /aws/service/canonical/ubuntu/server/26.04/stable --query "Parameters[?Value=='$BUILT_FROM'].Name" --output text
 ```
 
 ```bash
@@ -346,7 +346,7 @@ From there it is ordinary SQL. The table `messages` holds the mail.
 
 `infra/db-host.sh` is the same script the AWS machine runs. On a machine that is not in AWS it
 works in "manual" mode: it asks you for the tunnel's public key and prints the database password
-and the host key instead of storing them anywhere. It needs a fresh Ubuntu 24.04.
+and the host key instead of storing them anywhere. It needs a fresh Ubuntu 26.04.
 
 On your own computer, create the tunnel key pair:
 
@@ -403,7 +403,7 @@ only some of the code is indifferent to that.
 
 | Part | Today | Outside AWS |
 | --- | --- | --- |
-| Database | PostgreSQL on a small machine | Nothing to change. Any PostgreSQL 16 or later. See above |
+| Database | PostgreSQL 18 on a small machine | Nothing to change. PostgreSQL 18 or later: a dump restores into the same or a newer version, not an older one. See above |
 | Web site and webmail | The web container on Lambda, behind API Gateway | Runs as it is. The container is a plain HTTP server on port 8080 and runs anywhere docker runs. Put any reverse proxy with TLS in front of it and set `TRUSTED_PROXY_HOPS` to the number of proxies. It can take its secrets from environment variables instead of SSM (`POSTGRES_DB_PASSWORD`, `VAPID_PRIVATE_KEY`, and `SSH_TUNNEL_KEY_PATH` for a key file) |
 | Sending mail | SES, called through the AWS SDK by both containers | Needs code. There is no SMTP sender. One would have to be added to `src/server/send.ts` and to the Python forwarder, along with new DKIM and SPF records for whoever sends the mail |
 | Receiving mail | SES receives, stores the raw message in S3 and calls the inbox function with its verdicts (spam, virus, SPF, DKIM, DMARC) | Needs an adapter. The inbox handler expects an SES-shaped event and reads the message from S3. A different way in (your own mail server, or another provider's inbound hook) needs a small program that stores the message, builds that event and calls the handler. It must supply a trustworthy DMARC verdict, because the reply relay only acts on mail SES marked as DMARC `PASS` |
