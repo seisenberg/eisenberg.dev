@@ -423,16 +423,17 @@ class Database:
             fetch=False,
         )
 
-    def set_token_targets(self, token: str, forwarded_to: Sequence[str]) -> None:
-        """A retried forward reuses its token; the mailboxes it goes to are those of the retry."""
-        self._run("update relay_tokens set forwarded_to = %s where token = %s", [list(forwarded_to), token], fetch=False)
+    def set_token_targets(self, token: str, forwarded_to: Optional[Sequence[str]]) -> None:
+        """A retried forward reuses its token; who may answer is decided by the retry."""
+        self._run("update relay_tokens set forwarded_to = %s where token = %s",
+                  [list(forwarded_to) if forwarded_to else None, token], fetch=False)
 
-    def all_forward_targets(self, limit: int = 500) -> List[str]:
-        """Every mailbox any address rule forwards to (private addresses a relayed reply must not show)."""
+    def all_forward_targets(self) -> List[str]:
+        """Every mailbox any address rule forwards to (private addresses a relayed reply must not
+        show). All of them: a partial list would leave some unchecked."""
         rows = self._run(
             "select distinct lower(target) as target from address_rules, unnest(forward_to) as target "
-            "where forward_to is not null limit %s",
-            [int(limit)],
+            "where forward_to is not null"
         )
         return [row["target"] for row in rows]
 
@@ -444,13 +445,14 @@ class Database:
         )
         return rows[0] if rows else None
 
-    def find_token_for_message(self, inbox_message_id: str) -> Optional[Mapping[str, Any]]:
-        """Token created for a stored inbound message (used when a failed forward is retried)."""
+    def find_token_for_message(self, inbox_message_id: str, alias_address: Optional[str] = None) -> Optional[Mapping[str, Any]]:
+        """Token created for a stored inbound message (used when a failed forward is retried).
+        A message can have one token per forward: `alias_address` picks the forward."""
         rows = self._run(
             "select token, inbox_message_id, alias_address, correspondent, correspondent_name, "
             "orig_message_id, orig_references, subject, forwarded_to from relay_tokens "
-            "where inbox_message_id = %s order by created_at limit 1",
-            [inbox_message_id],
+            "where inbox_message_id = %s and (%s::text is null or alias_address = %s) order by created_at limit 1",
+            [inbox_message_id, alias_address, alias_address],
         )
         return rows[0] if rows else None
 

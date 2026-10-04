@@ -72,6 +72,13 @@ def test_full_round_trip(database, ids):
     group_token = token[:-1] + ("0" if token[-1] != "0" else "1")
     database.create_token(**{**fields, "token": group_token, "forwarded_to": ("ann@partners.example",)})
     assert database.get_token(group_token)["forwarded_to"] == ["ann@partners.example"]
+    # one message can have a token per forward: the alias picks it
+    database.create_token(**{**fields, "token": group_token[:-2] + "ff", "alias_address": "team@eisenberg.dev"})
+    assert database.find_token_for_message(inbound_id, "team@eisenberg.dev")["token"] == group_token[:-2] + "ff"
+    assert database.find_token_for_message(inbound_id, "cool@eisenberg.dev")["alias_address"] == "cool@eisenberg.dev"
+    assert database.find_token_for_message(inbound_id, "nobody@eisenberg.dev") is None
+    database.set_token_targets(group_token, None)
+    assert database.get_token(group_token)["forwarded_to"] is None
     database.touch_token(token)
     database.touch_token(token)
 
@@ -133,7 +140,7 @@ def test_address_rules_are_materialised_from_the_defaults(database, ids):
                          [[f"{ids}-ann@partners.example"], second])
             assert database.resolve_address_rule(first)["forward_to"] == [f"{ids}-ann@partners.example",
                                                                          f"{ids}-Raj@Elsewhere.example"]
-            mine = sorted(t for t in database.all_forward_targets(limit=100000) if t.startswith(ids))
+            mine = sorted(t for t in database.all_forward_targets() if t.startswith(ids))
             assert mine == [f"{ids}-ann@partners.example", f"{ids}-raj@elsewhere.example"]
             conn.execute("update address_rules set forward_to = null where address like %s", [ids + "%"])
 

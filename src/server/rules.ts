@@ -117,7 +117,20 @@ export async function setRule(v: Viewer, body: { address?: unknown; forward?: un
 }
 
 export async function resetRule(v: Viewer, body: { address?: unknown }): Promise<void> {
-  await query('delete from address_rules where address = $1', [checkAddress(v, body?.address)]);
+  const address = checkAddress(v, body?.address);
+  if (v.owner) {
+    await query('delete from address_rules where address = $1', [address]);
+    return;
+  }
+  // A member resets what a member can set. Where the address forwards to and whether it is
+  // blocked are the owner's: a rule that carries either is kept, with its switches put back.
+  const gone = await query('delete from address_rules where address = $1 and forward_to is null and not blocked', [address]);
+  if (gone.rowCount) return;
+  await query(
+    `update address_rules r set forward = s.default_forward, notify = s.default_notify, forward_style = s.default_forward_style, updated_at = now()
+       from mail_settings s where r.address = $1`,
+    [address],
+  );
 }
 
 export async function setDefaults(body: { forward?: unknown; notify?: unknown; forwardStyle?: unknown }): Promise<void> {

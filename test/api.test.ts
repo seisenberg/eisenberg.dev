@@ -773,7 +773,34 @@ test('users: a member sees only the mail of their domains', async () => {
   // a member's own change to the same rule leaves the owner's list in place
   assert.equal((await call('POST', '/api/mail/rules', { address: 'billing@harborlight.example', notify: false }, asMember())).status, 204);
   assert.deepEqual(((await call('GET', '/api/mail/rules')).json as DeliveryRules).rules.find((r) => r.address === 'billing@harborlight.example')!.forwardTo, ['books@accountant.example']);
+  // "Reset to the defaults" by a member puts the switches back but does not remove the owner's list, nor a block
+  assert.equal((await call('POST', '/api/mail/rules/reset', { address: 'billing@harborlight.example' }, asMember())).status, 204);
+  const afterReset = ((await call('GET', '/api/mail/rules')).json as DeliveryRules).rules.find((r) => r.address === 'billing@harborlight.example')!;
+  assert.deepEqual([afterReset.forwardTo, afterReset.notify], [['books@accountant.example'], ((await call('GET', '/api/mail/rules')).json as DeliveryRules).defaults.notify]);
+  await call('POST', '/api/mail/rules', { address: 'spam-trap@harborlight.example', blocked: true });
+  await call('POST', '/api/mail/rules/reset', { address: 'spam-trap@harborlight.example' }, asMember());
+  assert.equal(((await call('GET', '/api/mail/rules')).json as DeliveryRules).rules.find((r) => r.address === 'spam-trap@harborlight.example')!.blocked, true);
+  // a rule with neither is removed by a member as before; the owner's reset removes everything
+  await call('POST', '/api/mail/rules', { address: 'plain@harborlight.example', notify: false }, asMember());
+  await call('POST', '/api/mail/rules/reset', { address: 'plain@harborlight.example' }, asMember());
+  assert.equal((await local.pool.query(`select 1 from address_rules where address = 'plain@harborlight.example'`)).rowCount, 0);
   await call('POST', '/api/mail/rules/reset', { address: 'billing@harborlight.example' });
+  await call('POST', '/api/mail/rules/reset', { address: 'spam-trap@harborlight.example' });
+  assert.equal((await local.pool.query(`select 1 from address_rules where address in ('billing@harborlight.example', 'spam-trap@harborlight.example')`)).rowCount, 0);
+
+  // Mail to a reply-... address is written by a private mailbox (a reply the relay refused). It shows
+  // that mailbox's address, so only the owner sees it, also when the address is on the member's domain.
+  const relayShaped = 'reply-0123456789abcdef0123456789abcdef@harborlight.example';
+  await deliver('refused-reply-1', relayShaped, { From: 'Ann Private <ann@partners.example>', Subject: 'Re: refused relay attempt', 'Message-ID': '<refused-1@partners.example>' });
+  const refused = await first('mailbox=inbox&q=refused+relay+attempt');
+  assert.ok(refused, 'the owner sees it');
+  assert.equal(((await call('GET', '/api/mail/messages?mailbox=inbox&q=refused+relay+attempt', undefined, asMember())).json as MessageList).messages.length, 0);
+  assert.equal((await call('GET', `/api/mail/messages/${refused.id}`, undefined, asMember())).status, 404);
+  assert.equal((await call('GET', `/api/mail/messages/${refused.id}/raw`, undefined, asMember())).status, 404);
+  assert.ok(!JSON.stringify((await call('GET', '/api/mail/messages?mailbox=inbox&limit=200', undefined, asMember())).json).includes('ann@partners.example'));
+  await call('POST', '/api/mail/messages/delete', { ids: [refused.id] });
+  await call('PATCH', '/api/mail/messages', { ids: [refused.id], set: { mailbox: 'trash' } });
+  await call('POST', '/api/mail/messages/delete', { ids: [refused.id] });
 
   // everything about another domain's mail is "not found" for the member
   const foreign = await first('mailbox=inbox&q=Fractional');

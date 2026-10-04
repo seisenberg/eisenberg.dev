@@ -1,4 +1,5 @@
 """inbox.py: per-address delivery rules (forward / notify) and the Web Push step."""
+import base64
 import json
 import logging
 
@@ -571,19 +572,130 @@ def test_an_address_forwards_to_its_own_mailboxes_instead_of_the_default(process
     assert [a.addr_spec for a in relay.parse(sent["Data"])["To"].addresses] == [ANN, RAJ]
     assert OWNER.encode() not in sent["Data"].lower()                    # the default mailbox is not involved
     assert db.tokens[TOKEN1]["forwarded_to"] == [ANN, RAJ]
-    # an address without its own list still goes to the default
+    # an address without its own list still goes to the default, and only OWNER_ADDRESSES may answer it
     deliver(processor, s3, "in-2")
     assert ses.sent[1]["Destinations"] == [OWNER]
-    assert db.tokens[f"{2:032x}"]["forwarded_to"] == [OWNER]
+    assert db.tokens[f"{2:032x}"]["forwarded_to"] is None
 
 
-def test_mail_to_several_addresses_goes_once_to_all_their_mailboxes(processor, s3, ses, db, send):
+def test_addresses_with_different_mailboxes_get_separate_forwards(processor, s3, ses, db, send):
+    """One message to several addresses: the people behind one address neither see the mailboxes
+    of another nor get a token that answers as it."""
     db.set_rule(TEAM, forward_to=[ANN, RAJ])
     db.set_rule(OTHER, forward_to=[RAJ.upper()])
     db.set_rule("quiet@eisenberg.dev", forward=False, forward_to=["never@private.example"])
-    deliver(processor, s3, recipients=(ALIAS, TEAM, OTHER, "quiet@eisenberg.dev"))
+    db.set_rule("also@eisenberg.dev", forward_to=[RAJ, ANN.upper()])          # the same people as TEAM
+    outcome, _ = deliver(processor, s3, recipients=(ALIAS, TEAM, OTHER, "quiet@eisenberg.dev", "also@eisenberg.dev"))
+    assert outcome == "forwarded"
+    assert [sent["Destinations"] for sent in ses.sent] == [[OWNER], [ANN, RAJ], [RAJ], [RAJ, ANN]]
+    for sent in ses.sent:
+        shown = {a.addr_spec for a in relay.parse(sent["Data"])["To"].addresses}
+        assert shown == set(sent["Destinations"])
+        for other in {OWNER, ANN, RAJ} - shown:
+            assert other.encode() not in sent["Data"].lower()
+    tokens = {row["alias_address"]: row for row in db.tokens.values()}
+    assert sorted(tokens) == sorted([ALIAS, TEAM, OTHER, "also@eisenberg.dev"])
+    assert tokens[ALIAS]["forwarded_to"] is None
+    assert tokens[TEAM]["forwarded_to"] == [ANN, RAJ] and tokens[OTHER]["forwarded_to"] == [RAJ]
+    assert db.inbox["in-1"]["meta"]["forwarded"] is True
+
+    # Ann is on TEAM's list: she cannot answer through the owner's forward of the same message
+    ses.sent.clear()
+    owners = f"reply-{tokens[ALIAS]['token']}@{DOMAIN}"
+    outcome, _ = deliver(processor, s3, "reply-in-1", group_reply(ANN, owners), recipients=(owners,),
+                         from_header=f"Member <{ANN}>")
+    assert outcome != "relayed" and ses.to(BOB) == []
+    # through her own forward she answers as TEAM
+    ses.sent.clear()
+    teams = f"reply-{tokens[TEAM]['token']}@{DOMAIN}"
+    outcome, _ = deliver(processor, s3, "reply-in-2", group_reply(ANN, teams), recipients=(teams,),
+                         from_header=f"Member <{ANN}>")
+    assert outcome == "relayed" and ses.sent[0]["Source"] == TEAM
+
+
+def test_addresses_sharing_the_default_mailbox_still_get_one_forward(processor, s3, ses, db, send):
+    deliver(processor, s3, recipients=(ALIAS, OTHER))
+    assert [sent["Destinations"] for sent in ses.sent] == [[OWNER]]
+    assert [row["alias_address"] for row in db.tokens.values()] == [ALIAS]
+
+
+def test_a_retry_only_sends_the_forwards_that_are_missing(processor, s3, ses, db, send):
+    db.set_rule(TEAM, forward_to=[ANN])
+    ses.fail = lambda kwargs: ConnectionError("down") if kwargs["Destinations"] == [ANN] else None
+    with pytest.raises(ConnectionError):
+        deliver(processor, s3, recipients=(ALIAS, TEAM))
+    assert [sent["Destinations"] for sent in ses.sent] == [[OWNER]]
+    assert "forwarded" not in db.inbox["in-1"]["meta"]
+    ses.fail = None
+    assert deliver(processor, s3, recipients=(ALIAS, TEAM))[0] == "forwarded"
+    assert [sent["Destinations"] for sent in ses.sent] == [[OWNER], [ANN]]     # the owner's is not sent twice
+    assert len(db.tokens) == 2 and db.inbox["in-1"]["meta"]["forwarded"] is True
+    assert deliver(processor, s3, recipients=(ALIAS, TEAM))[0] == "duplicate"
+
+
+def test_a_default_mailbox_that_is_not_an_owner_address_cannot_answer(make_processor, s3, ses, db):
+    """FORWARD_TO may hold a mailbox that only receives (an archive); OWNER_ADDRESSES decides."""
+    archive = "archive@corp.example"
+    processor = make_processor(forward_to=(OWNER, archive), owner_addresses=(OWNER,))
+    deliver(processor, s3)
+    assert ses.sent[0]["Destinations"] == [OWNER, archive]
+    ses.sent.clear()
+    outcome, _ = deliver(processor, s3, "reply-in-1", group_reply(archive), recipients=(RELAY1,),
+                         from_header=f"Member <{archive}>")
+    assert outcome != "relayed" and ses.to(BOB) == []
+
+
+def test_a_correspondent_who_is_on_a_list_can_be_answered(processor, s3, ses, db, send):
+    """Ann, a member of the group, writes to the group address herself."""
+    db.set_rule(TEAM, forward_to=[ANN, RAJ])
+    db.set_rule(OTHER, forward_to=["ob@sender.example"])                     # the tail of bob@sender.example
+    s3.put("in-1", inbound_message(from_header=f"Ann <{ANN}>"))
+    assert processor.process_record(ses_record("in-1", (TEAM,), from_header=f"Ann <{ANN}>")) == "forwarded"
+    ses.sent.clear()
+    outcome, _ = deliver(processor, s3, "reply-in-1", group_reply(RAJ), recipients=(RELAY1,),
+                         from_header=f"Member <{RAJ}>")
+    assert outcome == "relayed"
     (sent,) = ses.sent
-    assert sent["Destinations"] == [OWNER, ANN, RAJ]                    # default for ALIAS, each mailbox once
+    assert sent["Destinations"] == [ANN] and RAJ.encode() not in sent["Data"].lower()
+
+    # a list mailbox that is the tail of the correspondent's address does not block the reply ...
+    deliver(processor, s3, "in-2")                                           # from bob@sender.example, default mailbox
+    ses.sent.clear()
+    relay2 = f"reply-{2:032x}@{DOMAIN}"
+    assert deliver(processor, s3, "reply-in-2", owner_reply(relay2), recipients=(relay2,),
+                   from_header=f"Owner Private <{OWNER_MIXED}>")[0] == "relayed"
+    assert ses.sent[0]["Destinations"] == [BOB]
+    # ... but that mailbox on its own is still caught
+    assert relay.assert_no_leak(b"To: bob@sender.example\r\n\r\nhi", ["ob@sender.example"], None,
+                                allow=("bob@sender.example",)) is None
+    with pytest.raises(relay.LeakError):
+        relay.assert_no_leak(b"To: bob@sender.example\r\n\r\nask ob@sender.example", ["ob@sender.example"], None,
+                             allow=("bob@sender.example",))
+
+
+def test_a_reply_that_cannot_be_sent_is_reported_to_its_writer_only(processor, s3, ses, db, send):
+    db.set_rule(TEAM, forward_to=[ANN, RAJ])
+    deliver(processor, s3, recipients=(TEAM,))
+    ses.sent.clear()
+    leaky = (b"--_004_outer_\r\nContent-Type: application/octet-stream; name=\"export.dat\"\r\n"
+             b"Content-Transfer-Encoding: base64\r\n\r\n" + base64.b64encode(b"\x00to=" + RAJ.encode() + b"\x02"))
+    raw = owner_reply(RELAY1, extra_parts=leaky)                              # written by the owner
+    assert deliver(processor, s3, "reply-in-1", raw, recipients=(RELAY1,),
+                   from_header=f"Owner Private <{OWNER_MIXED}>")[0] == "relay_blocked"
+    (notice,) = ses.sent
+    assert notice["Destinations"] == [OWNER] and ses.to(BOB) == []
+
+
+def test_mail_to_a_relay_address_is_not_announced_to_the_members_of_that_domain(processor, s3, ses, db, send):
+    """A refused relay attempt is mail from a private mailbox: only the owner hears of it."""
+    db.users[2] = {"role": "member", "domains": [DOMAIN]}
+    db.add_subscription(APPLE, user_id=2)
+    db.set_rule(TEAM, forward_to=[ANN])
+    deliver(processor, s3, recipients=(TEAM,))
+    assert len(send.calls) == 2                                               # ordinary mail: owner and member
+    send.calls.clear()
+    deliver(processor, s3, "reply-in-1", group_reply(RAJ), recipients=(RELAY1,), from_header=f"Member <{RAJ}>")
+    assert len(send.calls) == 1
 
 
 @pytest.mark.parametrize("bad", [

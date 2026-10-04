@@ -108,10 +108,17 @@ defended and the most tested part (about 250 tests in `py/tests`).
   parsers and SES's own parse agree on that address, SES reports DMARC `PASS`, and it is not an
   auto-reply or bounce.
 - An address can forward to its own list of outside mailboxes (a group). Only the owner can set
-  that list, and a member never sees it. A mailbox on a domain this system receives for is refused
-  (it would loop). Being on one address's list gives no right to answer mail that was forwarded
-  for another address. Every mailbox on any list counts as private: all of them are scrubbed from
-  a relayed reply and checked for by the final scan.
+  that list, and a member never sees it or removes it. A mailbox on a domain this system receives
+  for is refused (it would loop).
+- A message to several addresses is forwarded once per list: addresses with different mailboxes
+  get separate forwards, each with its own token. So the people behind one address never see the
+  mailboxes of another, and can only answer as an address they receive for. The default mailboxes
+  (`FORWARD_TO`) get no such right from receiving a forward: for them `OWNER_ADDRESSES` decides.
+- Every mailbox on any list counts as private: all of them are scrubbed from a relayed reply and
+  looked for by the final scan. The one exception is the correspondent's own address.
+- Mail that arrives on a `reply-<token>@` address without being relayed (a refused reply, an
+  out-of-office) is stored for the owner only. Members of that domain neither see it nor get a
+  notification, because it shows a private mailbox's address.
 - The outgoing message is rebuilt. Only the body survives. Every header from your mail client is
   dropped (Received, originating IP, mailer, message id, DKIM signature).
 - Your private address and the relay address are replaced inside quoted text, in every encoding.
@@ -230,6 +237,21 @@ Two things are by design. A session can add a passkey without the password for t
 a password sign-in, so a session stolen in that window could add one; passkeys are listed in the
 settings and removed by a password change. And the owner operates the system and holds the vault
 key, so a member's authenticator entries are not protected from the owner.
+
+### Fourth review: addresses that forward to a group
+
+Per-address forward lists change who may answer through the relay, so that change was reviewed
+before it shipped. Seven findings, all fixed with tests:
+
+| Severity | Finding | Fix |
+| --- | --- | --- |
+| High | A message to several addresses was forwarded once to all their mailboxes together. The lists saw each other and the owner's mailbox, and anyone on one list could answer as the first address. | One forward and one token per list, made for an address of that list. |
+| Medium | Every default mailbox became an allowed sender, bypassing `OWNER_ADDRESSES`. | Only an address's own list is recorded as allowed to answer. |
+| Medium | A reply was blocked when the correspondent was on a list, or when a list mailbox was the tail of the correspondent's address. | The correspondent's own address is not treated as private, and is skipped where it stands in full. |
+| Medium | A member's "Reset to the defaults" removed the owner's forward list, or a block. | A member's reset only puts the switches back. |
+| Low | A notice about a reply that could not be sent went to the whole list instead of its writer. | It goes to the writer. |
+| Low | A refused reply was visible to members of that domain in the webmail and announced to them. | Owner only. |
+| Low | The list of mailboxes to scrub was capped. | All of them are read. |
 
 ## AWS settings the code relies on
 

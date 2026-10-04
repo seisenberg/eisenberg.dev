@@ -107,8 +107,9 @@ address is blocked, so the installed app with notifications can replace forwardi
 An address can also forward to **its own mailboxes** instead of the default one, for example
 `billing@` to the bookkeeper, or `team@` to three people. That makes the address a small group:
 everyone on the list receives the forward, and any of them can reply from their own mailbox. The
-reply goes out from the address itself, and none of their private addresses is shown. Set it from
-the menu on an address (**Forward to other mailboxes**).
+reply goes out from the address itself, and none of their private addresses is shown. A message
+sent to several addresses is forwarded separately to each list, so one group never sees another.
+Set it from the menu on an address (**Forward to other mailboxes**).
 
 | | |
 | --- | --- |

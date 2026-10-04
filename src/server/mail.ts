@@ -38,11 +38,18 @@ export interface Viewer {
   domains: string[] | null;
 }
 
-/** SQL condition restricting `column` (a text[] of domains) to the viewer. Appends its parameter. */
+/**
+ * SQL condition restricting `column` (a text[] of domains) to the viewer. Appends its parameter.
+ *
+ * Mail addressed to a reply-<token>@ address is never a member's: it is written by a private
+ * mailbox (a reply the relay did not accept, an out-of-office answering a forward) and shows that
+ * mailbox's address. Only the owner sees it.
+ */
 function visible(v: Viewer, params: unknown[], column = 'domains'): string {
   if (v.domains === null) return 'true';
   params.push(v.domains);
-  return `${column} && $${params.length}::text[]`;
+  const addresses = column.replace(/domains$/, 'addresses');
+  return `(${column} && $${params.length}::text[] and ${addresses}::text !~ '[{,]"?reply-[0-9a-f]{32}@')`;
 }
 
 const MAILBOXES: Mailbox[] = ['inbox', 'archive', 'trash', 'junk', 'sent'];

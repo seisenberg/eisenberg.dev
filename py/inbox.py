@@ -26,7 +26,7 @@ import logging
 import re
 import secrets
 from datetime import datetime, timezone
-from typing import Any, Callable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, List, Mapping, NamedTuple, Optional, Tuple
 
 import config as config_module
 import push
@@ -43,6 +43,14 @@ _SIZE_ERROR_RE = re.compile(r"message (?:length|size)|length is more than|too (?
 _NOT_SIZE_CODES = frozenset({"throttling", "throttlingexception", "limitexceededexception", "toomanyrequestsexception"})
 SIZE_FALLBACK_MIN_BYTES = 1_000_000
 MAX_FORWARD_TARGETS = 50  # SES takes at most 50 recipients in one message
+
+
+class ForwardPlan(NamedTuple):
+    """One forward of an inbound message."""
+    alias: Optional[str]                    # our address the forward is made for (replies go out From it)
+    style: str                              # inline | attach
+    targets: Tuple[str, ...]                # the mailboxes it is sent to
+    answerable: Optional[Tuple[str, ...]]   # those that may answer besides OWNER_ADDRESSES (an own list)
 
 _singletons: dict = {}
 
@@ -236,7 +244,7 @@ class Processor:
                     common_from = (mail.get("commonHeaders") or {}).get("from")
                     reason = relay.relay_refusal_reason(msg, receipt, allowed, ses_from=common_from)
             if reason is None:
-                return self._relay(message_id, notification, raw, relay_addr, token_row)
+                return self._relay(message_id, notification, raw, relay_addr, token_row, relay.from_address(msg))
             log.warning("record %s: relay refused (%s); handling as normal inbound", message_id, reason)
             loop = relay.auto_response_reason(msg) or relay.bounce_reason(msg, mail.get("source"))
             if loop is not None:
@@ -284,7 +292,8 @@ class Processor:
         """Store, then forward (when the address rules say so), then notify (when they say so).
 
         Each finished step leaves a key in the row's meta, so a Lambda retry only redoes what is
-        missing:  forwarded: true | false (+ forward_skipped: "rule" | "loop"),  notified: true | false.
+        missing:  forwarded: true | false (+ forward_skipped: "rule" | "loop"),  notified: true | false,
+        and, while a message with several forwards is under way, forwarded_for: [alias, ...].
         `base_meta` (blocked_recipients) is written with the row itself.
         """
         inserted = self.db.insert_inbox(message_id, key, notification, raw, "inbound", base_meta)
@@ -297,18 +306,31 @@ class Processor:
             if "forwarded" in meta and "notified" in meta:
                 return "duplicate"
 
-        want_forward, want_notify, style, targets = self._delivery(recipients)
+        plans, want_notify = self._delivery(recipients, alias)
 
         forward_error: Optional[BaseException] = None
         if "forwarded" in meta:
             outcome = "forwarded" if meta["forwarded"] else "stored"
-        elif loop or not want_forward:
+        elif loop or not plans:
             self.db.merge_inbox_meta(message_id, {"forwarded": False, "forward_skipped": "loop" if loop else "rule"})
             outcome = "stored"
         else:
+            # One forward per plan. A retry skips the plans that were already sent.
+            done = [str(a) for a in (meta.get("forwarded_for") or [])]
+            outcome = "forwarded"
             try:
-                outcome = self._forward(message_id, raw, msg, recipients, alias, domain, style,
-                                        reuse_token=not inserted, targets=targets)
+                for plan in plans:
+                    mark = plan.alias or ""
+                    if mark in done:
+                        continue
+                    result = self._forward(message_id, raw, msg, recipients, plan.alias, domain, plan.style,
+                                           reuse_token=not inserted, targets=plan.targets,
+                                           answerable=plan.answerable)
+                    if result != "forwarded":
+                        outcome = result
+                    done.append(mark)
+                    if len(plans) > 1:
+                        self.db.merge_inbox_meta(message_id, {"forwarded_for": list(done)})
                 self.db.merge_inbox_meta(message_id, {"forwarded": True})
             except Exception as exc:  # still notify (the mail is stored), then fail the record
                 forward_error = exc
@@ -324,48 +346,75 @@ class Processor:
             raise forward_error
         return outcome
 
-    def _delivery(self, recipients) -> Tuple[bool, bool, str, Tuple[str, ...]]:
-        """(forward, notify, forward style, mailboxes to forward to) for a normal inbound message.
+    def _delivery(self, recipients, alias=None) -> Tuple[List["ForwardPlan"], bool]:
+        """(forwards to make, notify) for a normal inbound message.
 
-        The mailboxes are those of every recipient whose rule forwards: the rule's own list, or
-        FORWARD_TO when it has none. One forward goes to all of them together.
+        Each ordinary address gets its rule row from the current defaults the first time it
+        receives mail; relay-shaped addresses never get a row and use the mail_settings defaults,
+        as does a message with no recipient on our domains. notify is true when ANY rule says so.
 
+        Forwards: every recipient whose rule forwards has its mailboxes, its own list or
+        FORWARD_TO. Recipients with the same mailboxes share one forward; different mailboxes get
+        separate forwards, each with its own relay token. So the people behind one address never
+        see the mailboxes of another, and can only answer as an address they receive for.
 
-        forward / notify are true when ANY of our recipients' rules says so. Each ordinary address
-        gets its rule row from the current defaults the first time it receives mail; relay-shaped
-        addresses never get a row and use the mail_settings defaults, as does a message with no
-        recipient on our domains.
-
-        The style is that of the address the forward is made for: the primary alias (our first
-        recipient) when its rule forwards, otherwise the first recipient in envelope order whose
-        rule forwards. Unknown values are 'inline'."""
+        A forward to an address's own list is made for one of the addresses with that list: the
+        primary alias (our first recipient) when it is among them, otherwise the first in
+        envelope order. A forward to the default mailboxes is made for the primary alias, unless
+        that address has a forward of its own. The style is that of the first address of the
+        forward whose rule forwards (unknown values are 'inline')."""
         ours = self._ours(recipients)
         defaults = None
-        rules = []
+        entries: List[Tuple[Optional[str], Mapping[str, Any]]] = []
         for address in ours:
             if relay.RELAY_LOCAL_RE.match(address.rpartition("@")[0]):
                 defaults = defaults or self.db.get_mail_defaults()
-                rules.append(defaults)
+                entries.append((address, defaults))
             else:
-                rules.append(self.db.resolve_address_rule(address))
-        if not rules:
-            rules.append(self.db.get_mail_defaults())
-        forwarding = [rule for rule in rules if rule["forward"]]
-        style = relay.normalize_forward_style(forwarding[0].get("forward_style")) if forwarding else "inline"
-        return bool(forwarding), any(rule["notify"] for rule in rules), style, self._targets(forwarding)
+                entries.append((address, self.db.resolve_address_rule(address)))
+        if not entries:
+            entries.append((alias, self.db.get_mail_defaults()))
 
-    def _targets(self, forwarding) -> Tuple[str, ...]:
-        """The mailboxes a forward goes to. Never one of our own receiving addresses (that would
-        loop), never more than SES takes in one message; FORWARD_TO when nothing usable is left."""
-        wanted: List[str] = []
-        for rule in forwarding:
-            wanted.extend(rule.get("forward_to") or self.cfg.forward_to)
+        groups: dict = {}
+        for address, rule in entries:
+            if not rule["forward"]:
+                continue
+            targets, own = self._targets(address, rule)
+            groups.setdefault((own, targets), []).append((address, rule))
+        primary_forwards = any(address == alias for members in groups.values() for address, _ in members)
+        plans = []
+        for (own, targets), members in groups.items():
+            chosen = next((m for m in members if m[0] == alias), members[0])
+            made_for = chosen[0]
+            if not own and not primary_forwards:
+                # The default mailboxes are the owner's, who may answer as any address: the
+                # forward stays under the primary alias even when that address's own rule is off.
+                made_for = alias
+            plans.append(ForwardPlan(
+                alias=made_for,
+                style=relay.normalize_forward_style(chosen[1].get("forward_style")),
+                targets=targets,
+                answerable=targets if own else None,
+            ))
+        return plans, any(rule["notify"] for _, rule in entries)
+
+    def _targets(self, address, rule) -> Tuple[Tuple[str, ...], bool]:
+        """(mailboxes, from the rule's own list?) for one forwarding address. A listed mailbox is
+        never one of our own receiving addresses (that would loop) and is a plain address;
+        FORWARD_TO when the rule has no list, or nothing usable is left of it."""
+        wanted = rule.get("forward_to")
+        if not wanted:
+            return tuple(self.cfg.forward_to), False
         domains = self.cfg.mail_domains
         usable = []
-        for address in dict.fromkeys(str(a).strip().lower() for a in wanted):
-            if relay.is_plain_address(address) and not (domains and relay.domain_of(address) in domains):
-                usable.append(address)
-        return tuple(usable[:MAX_FORWARD_TARGETS]) or tuple(self.cfg.forward_to)
+        for target in dict.fromkeys(str(a).strip().lower() for a in wanted):
+            if relay.is_plain_address(target) and not (domains and relay.domain_of(target) in domains):
+                usable.append(target)
+        if len(usable) < len(wanted):
+            log.warning("forward list of %s: %d of %d mailbox(es) unusable", address, len(wanted) - len(usable), len(wanted))
+        if not usable:
+            return tuple(self.cfg.forward_to), False
+        return tuple(usable[:MAX_FORWARD_TARGETS]), True
 
     def _notify_step(self, message_id, msg, alias, domain, want_notify, recipients=()) -> None:
         """Web Push. Nothing in here may fail the record or hold up the forward."""
@@ -386,7 +435,10 @@ class Processor:
                     self.db,
                     lambda badge, scope=None: push.build_payload(msg, alias_for(scope), message_id, badge),
                     self.cfg.fallback_domain or domain,
-                    recipient_domains={relay.domain_of(r) for r in ours},
+                    # Mail to a reply-... address comes from a private mailbox (a relay attempt that
+                    # was refused): it is the owner's, not the mail of that domain's members.
+                    recipient_domains={relay.domain_of(r) for r in ours
+                                       if not relay.RELAY_LOCAL_RE.match(r.rpartition("@")[0])},
                 )
                 log.info("record %s: push %s", message_id, counts)
                 notified = True
@@ -394,16 +446,23 @@ class Processor:
         except Exception as exc:
             log.error("record %s: push step failed (%s); continuing", message_id, type(exc).__name__)
 
-    def _forward(self, message_id, raw, msg, recipients, alias, domain, style, reuse_token, targets=None) -> str:
+    def _forward(self, message_id, raw, msg, recipients, alias, domain, style, reuse_token, targets=None,
+                 answerable=None) -> str:
+        """`targets`: the mailboxes this forward goes to. `answerable`: those of them that may
+        answer through the relay besides OWNER_ADDRESSES (the address's own list; None for the
+        default mailboxes, where OWNER_ADDRESSES alone decides)."""
         targets = tuple(targets or self.cfg.forward_to)
+        answerable = list(answerable) if answerable else None
+        if alias:
+            domain = relay.domain_of(alias)
         sender = f"noreply@{domain}"
         correspondent = relay.extract_correspondent(msg) if alias else None
         if correspondent is not None:
-            existing = self.db.find_token_for_message(message_id) if reuse_token else None
+            existing = self.db.find_token_for_message(message_id, alias) if reuse_token else None
             if existing is not None:
                 token = existing["token"]
-                if list(existing.get("forwarded_to") or ()) != list(targets):
-                    self.db.set_token_targets(token, targets)
+                if (list(existing.get("forwarded_to") or ()) or None) != answerable:
+                    self.db.set_token_targets(token, answerable)
             else:
                 token = self._new_token()
                 references = relay.message_ids(" ".join(relay.header_values(msg, "References"))) or relay.message_ids(
@@ -418,7 +477,7 @@ class Processor:
                     orig_message_id=(relay.message_ids(relay.header_value(msg, "Message-ID", "")) or [None])[0],
                     orig_references=" ".join(references) or None,
                     subject=relay.clean_header_text(relay.header_value(msg, "Subject", "")) or None,
-                    forwarded_to=targets,
+                    forwarded_to=answerable,
                 )
             sender = relay.relay_address(token, domain)
         else:
@@ -444,7 +503,7 @@ class Processor:
         return "forwarded"
 
     # ------------------------------------------------------------------------------------
-    def _relay(self, message_id, notification, raw, relay_addr, token_row) -> str:
+    def _relay(self, message_id, notification, raw, relay_addr, token_row, sender=None) -> str:
         if self.db.relay_already_sent(message_id):
             return "relay_duplicate"
 
@@ -452,14 +511,19 @@ class Processor:
         correspondent = token_row["correspondent"]
         # Nothing on the private side may show in what goes out: the owner's addresses, the
         # mailboxes this forward went to, and every other mailbox an address forwards to (a quoted
-        # older message may name them).
+        # older message may name them). The correspondent's own address is not private to them,
+        # also when it happens to be on a list.
         group = tuple(token_row.get("forwarded_to") or ())
         private = tuple(dict.fromkeys(
-            str(a).strip().lower()
-            for a in tuple(self.cfg.private_addresses) + group + tuple(self.db.all_forward_targets())
-            if a and str(a).strip()
+            address for address in (
+                str(a).strip().lower()
+                for a in tuple(self.cfg.private_addresses) + group + tuple(self.db.all_forward_targets())
+                if a
+            )
+            if address and address != str(correspondent).strip().lower()
         ))
-        notice_to = group or tuple(self.cfg.forward_to)
+        # a notice about a reply that could not be sent goes to whoever wrote it
+        notice_to = (sender,) if sender else tuple(self.cfg.forward_to)
         params = relay.RelayParams(
             alias_address=alias,
             correspondent=correspondent,
@@ -473,7 +537,7 @@ class Processor:
         )
         try:
             data = relay.build_relay_reply(raw, params)
-            relay.assert_no_leak(data, private, relay_addr, allow=(alias,))
+            relay.assert_no_leak(data, private, relay_addr, allow=(alias, correspondent))
         except Exception as exc:
             if isinstance(exc, relay.LeakError):
                 reason = str(exc)

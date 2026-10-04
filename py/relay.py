@@ -494,6 +494,16 @@ def bounce_reason(msg: Message, envelope_from: Optional[str] = None) -> Optional
     return None
 
 
+def from_address(msg: Message) -> Optional[str]:
+    """The single From address of a message that passed relay_refusal_reason (lowercased)."""
+    try:
+        raw_from = _raw_header_values(msg, "From")
+        parsed = msg.policy.header_fetch_parse("From", raw_from[0])
+        return parsed.addresses[0].addr_spec.lower()
+    except Exception:
+        return None
+
+
 def relay_refusal_reason(
     msg: Message,
     receipt: Mapping,
@@ -800,16 +810,21 @@ def assert_no_leak(
     * every leaf part after transfer-decoding: text parts in their charset (also HTML-unescaped
       and URL-unquoted), all parts as raw bytes and as UTF-16.
 
-    `allow` lists relay-shaped addresses that may appear (the alias itself, in the odd case the
-    alias has that shape). The error message names the location, never the content."""
+    `allow` lists addresses that may appear: the alias and the correspondent. Where one of them
+    stands in full it is not searched, so a private address that is merely the tail of it
+    (ob@x inside bob@x) is not mistaken for a leak; anywhere else a private address still is.
+    The error message names the location, never the content."""
     needles = [a.strip().lower() for a in private_addresses if a and a.strip()]
     if relay_address:
         needles.append(relay_address.strip().lower())
-    allowed = {a.lower() for a in allow}
+    allowed = {a.strip().lower() for a in allow if a and a.strip()}
     needles = [n for n in needles if n not in allowed]
+    masks = sorted((a for a in allowed if any(n in a for n in needles)), key=len, reverse=True)
 
     def check(text: str, where: str, deep: bool = True) -> None:
         for view in _views(text, deep):
+            for mask in masks:
+                view = view.replace(mask, "\x00")
             for needle in needles:
                 if needle in view:
                     kind = "relay address" if needle == (relay_address or "").lower() else "private address"

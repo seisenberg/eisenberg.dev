@@ -393,19 +393,18 @@ class FakeDB:
             last_used_at=None, use_count=0))
 
     def set_token_targets(self, token, forwarded_to):
-        self.tokens[token]["forwarded_to"] = list(forwarded_to)
+        self.tokens[token]["forwarded_to"] = list(forwarded_to) if forwarded_to else None
 
-    def all_forward_targets(self, limit=500):
-        seen = dict.fromkeys(t.lower() for rule in self.address_rules.values() for t in (rule.get("forward_to") or ()))
-        return list(seen)[:limit]
+    def all_forward_targets(self):
+        return list(dict.fromkeys(t.lower() for rule in self.address_rules.values() for t in (rule.get("forward_to") or ())))
 
     def get_token(self, token):
         row = self.tokens.get(token)
         return dict(row) if row else None
 
-    def find_token_for_message(self, inbox_message_id):
+    def find_token_for_message(self, inbox_message_id, alias_address=None):
         for row in self.tokens.values():
-            if row["inbox_message_id"] == inbox_message_id:
+            if row["inbox_message_id"] == inbox_message_id and alias_address in (None, row["alias_address"]):
                 return dict(row)
         return None
 
