@@ -15,6 +15,7 @@ What you end up with:
 | Container registry, buckets, IAM roles, GitHub deploy role | `infra/bootstrap.yml`, deployed once by you |
 | The database host, its daily snapshots, the backup bucket | `infra/database.yml`, deployed once by you. The host sets itself up with `infra/db-host.sh` |
 | The two Lambda functions, HTTPS endpoint, SES receiving rule, reconcile schedule, alarms | `infra/app.yml`, deployed by you |
+| Per domain: the DNS zone, the SES identity, the mail records, the site's certificate | `infra/domain.yml`, one stack per domain, deployed by you |
 | New code on every push to `main` | `.github/workflows/deploy.yml` |
 | Secrets | SSM Parameter Store, never in git. The database host creates the database password and the tunnel key itself. The only one you type in is the optional push key |
 
@@ -309,37 +310,40 @@ Open `SiteUrl`, go to `/mail` and sign in. Then do three things right away:
    reports. The rule keeps those machine-made reports in the webmail, where you can look at them
    when you want, and out of your private mailbox and your phone's notifications.
 
-## 9. Mail: SES identities, DNS, receiving, sending
+## 9. DNS and mail for each domain
+
+One stack per domain does it all: `infra/domain.yml` creates the Route 53 hosted zone, the SES
+identity that lets this account receive and send for the domain, and the DNS records mail needs
+(DKIM, the MX record, the custom MAIL FROM records, DMARC).
+
+**Is the domain in use somewhere already** (mail or DNS in another AWS account, or at another
+provider)? Then follow [MOVING-FROM-ANOTHER-ACCOUNT.md](MOVING-FROM-ANOTHER-ACCOUNT.md) instead of
+items 1 and 2 below. It uses the same stack, in an order that does not lose mail.
 
 For **each** domain in `MailDomains`:
 
-1. Create the identity, read its DKIM tokens, and set the custom MAIL FROM domain:
+1. Deploy its stack. The stack name is the domain with dashes:
 
    ```bash
-   aws sesv2 create-email-identity --email-identity eisenberg.dev
+   aws cloudformation deploy --stack-name eisenmail-domain-eisenberg-dev --template-file infra/domain.yml \
+     --parameter-overrides DomainName=eisenberg.dev
    ```
 
    ```bash
-   aws sesv2 get-email-identity --email-identity eisenberg.dev --query "DkimAttributes.Tokens"
+   aws cloudformation describe-stacks --stack-name eisenmail-domain-eisenberg-dev --query "Stacks[0].Outputs" --output table
    ```
+
+2. At the registrar where the domain was bought, replace the domain's name servers with the four
+   in the `NameServers` output. For GoDaddy the clicks are in
+   [MOVING-FROM-ANOTHER-ACCOUNT.md](MOVING-FROM-ANOTHER-ACCOUNT.md#5-switch-the-name-servers-at-godaddy).
+   This is the moment the domain starts using this zone; it can take an hour or two to be seen
+   everywhere. SES then finds its records and verifies the domain by itself:
 
    ```bash
-   aws sesv2 put-email-identity-mail-from-attributes --email-identity eisenberg.dev --mail-from-domain mail.eisenberg.dev
+   aws sesv2 get-email-identity --email-identity eisenberg.dev --query "[VerifiedForSendingStatus, DkimAttributes.Status]"
    ```
 
-2. Add these DNS records at the domain's DNS provider:
-
-   | Type | Name | Value | Purpose |
-   | --- | --- | --- | --- |
-   | CNAME | `<token>._domainkey` (three of them) | `<token>.dkim.amazonses.com` | DKIM signing |
-   | MX | `@` | `10 inbound-smtp.us-east-1.amazonaws.com` | receive mail (this moves the domain's mail here) |
-   | MX | `mail` | `10 feedback-smtp.us-east-1.amazonses.com` | custom MAIL FROM |
-   | TXT | `mail` | `v=spf1 include:amazonses.com ~all` | SPF for the MAIL FROM domain |
-   | TXT | `@` | `v=spf1 include:amazonses.com ~all` | SPF |
-   | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@eisenberg.dev` | DMARC |
-
-   Use your region in the two host names. The `@` MX record is the switch that actually moves a
-   domain's mail to this system, so add it last, when you are ready.
+   It is ready when that prints `true` and `SUCCESS`.
 
 Then, once for the account:
 
@@ -349,39 +353,103 @@ Then, once for the account:
    aws ses set-active-receipt-rule-set --rule-set-name eisenmail
    ```
 
-4. Request production access: **SES console, Account dashboard, Request production access**
-   (mail type: transactional; describe it as personal mail for your own domains with replies to
-   people who wrote to you). Until it is granted, SES only sends to verified addresses. To use the
-   system meanwhile, verify your private mailbox as an identity:
+4. Request production access. Until it is granted, SES only sends to verified addresses and at
+   most 200 messages a day. In the **SES console, Account dashboard, Request production access**,
+   or from the command line:
+
+   ```bash
+   aws sesv2 put-account-details --production-access-enabled --mail-type TRANSACTIONAL \
+     --website-url https://eisenberg.dev --contact-language EN \
+     --use-case-description "Personal mail for my own domains. Incoming mail is forwarded to my own mailbox, and I reply to people who wrote to me first. No marketing or bulk mail. Bounces and complaints are monitored with CloudWatch alarms."
+   ```
+
+   AWS answers by email, usually within a day. To use the system meanwhile, verify your private
+   mailbox as an identity (AWS sends it a link to click):
 
    ```bash
    aws sesv2 create-email-identity --email-identity <your private mailbox>
    ```
 
-Adding a domain later: add it to `MailDomains` (step 7 command), repeat 1 and 2 for it, and
-create its `dmarc@` delivery rule (step 8).
+Adding a domain later: deploy a stack for it (item 1), switch its name servers (item 2), add it
+to `MailDomains` (step 7 command), and create its `dmarc@` delivery rule (step 8).
+
+What the stack leaves alone: the TXT record at the top of the domain, and every record you add
+to the zone yourself. Options: `ReceiveMail=false` (no MX record: the domain only sends),
+`DmarcPolicy=none|quarantine|reject` (default `quarantine`), `MailFromSubdomain` (default `mail`).
+
+<details>
+<summary>The domain's DNS stays somewhere else (no Route 53)</summary>
+
+Skip the stack and do by hand what it does. Create the identity and read its DKIM tokens:
+
+```bash
+aws sesv2 create-email-identity --email-identity eisenberg.dev
+```
+
+```bash
+aws sesv2 get-email-identity --email-identity eisenberg.dev --query "DkimAttributes.Tokens"
+```
+
+```bash
+aws sesv2 put-email-identity-mail-from-attributes --email-identity eisenberg.dev --mail-from-domain mail.eisenberg.dev
+```
+
+Add these records at the DNS provider (use your region in the two host names):
+
+| Type | Name | Value | Purpose |
+| --- | --- | --- | --- |
+| CNAME | `<token>._domainkey` (three of them) | `<token>.dkim.amazonses.com` | DKIM signing, and proof of ownership |
+| MX | `@` | `10 inbound-smtp.us-east-1.amazonaws.com` | receive mail (this moves the domain's mail here: add it last) |
+| MX | `mail` | `10 feedback-smtp.us-east-1.amazonses.com` | custom MAIL FROM |
+| TXT | `mail` | `v=spf1 include:amazonses.com ~all` | SPF for the MAIL FROM domain |
+| TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@eisenberg.dev` | DMARC |
+
+For the site (step 10), request the certificate yourself with
+`aws acm request-certificate --domain-name eisenberg.dev --validation-method DNS`, add the CNAME
+that `aws acm describe-certificate` shows, and point the domain at the `DnsTarget` output of the
+application stack (ALIAS/ANAME at the top of a domain, CNAME for a subdomain).
+
+</details>
 
 ## 10. Move the site to its domain
 
-1. Request a certificate **in the same region as the stack**:
+Do this once the registrar points at the zone (step 9, item 2): the certificate is validated
+through DNS, and `.dev` domains are only ever reached over HTTPS.
+
+1. Add the certificate to the domain's stack. The command returns when it has been issued,
+   usually within a few minutes:
 
    ```bash
-   aws acm request-certificate --domain-name eisenberg.dev --validation-method DNS
+   aws cloudformation deploy --stack-name eisenmail-domain-eisenberg-dev --template-file infra/domain.yml \
+     --parameter-overrides Certificate=true
    ```
 
-   Add the CNAME that `aws acm describe-certificate --certificate-arn <arn>` shows, and wait for
-   the status `ISSUED`.
-2. Update the stack:
+2. Give the application stack the domain, the certificate and the zone. It creates the record
+   that points the domain at the site:
+
+   ```bash
+   DOMAIN_STACK=eisenmail-domain-eisenberg-dev
+   ```
 
    ```bash
    aws cloudformation deploy --stack-name eisenmail --template-file infra/app.yml \
-     --parameter-overrides DomainName=eisenberg.dev CertificateArn=<certificate arn>
+     --parameter-overrides DomainName=eisenberg.dev \
+       CertificateArn=$(aws cloudformation describe-stacks --stack-name $DOMAIN_STACK --query "Stacks[0].Outputs[?OutputKey=='CertificateArn'].OutputValue" --output text) \
+       HostedZoneId=$(aws cloudformation describe-stacks --stack-name $DOMAIN_STACK --query "Stacks[0].Outputs[?OutputKey=='HostedZoneId'].OutputValue" --output text)
    ```
 
-3. Point the domain at the `DnsTarget` output: an ALIAS/ANAME record for the apex (in Route 53,
-   an alias A record using `DnsTargetHostedZoneId`), or a CNAME for a subdomain.
-4. If the site was used on its temporary address with the file drop, nothing else changes. If you
-   serve it on more than one origin, list them all in the bootstrap stack's `SiteOrigins`.
+3. Allow the new address to upload to the file drop:
+
+   ```bash
+   aws cloudformation deploy --stack-name eisenmail-bootstrap --template-file infra/bootstrap.yml \
+     --capabilities CAPABILITY_NAMED_IAM --parameter-overrides SiteOrigins="https://eisenberg.dev"
+   ```
+
+4. Open `https://eisenberg.dev/api/health`. Then add your passkeys again: a passkey belongs to
+   the site's address, so one made on the temporary address does not work here.
+
+Only the bare domain is served. If you want `www.eisenberg.dev` too, it needs its own
+certificate name and API mapping, which this setup does not create.
 
 ## 11. Phone
 
@@ -448,6 +516,7 @@ At list prices in us-east-1, for one person's mail, roughly 12 US dollars a mont
 | Its public IPv4 address | 3.65 |
 | Disk snapshots (7 days, only changed blocks are stored) and database dumps in S3 (90 days) | well under 1.00 |
 | Alarms and the one custom metric | 0 to 1.00 |
+| Route 53 hosted zone | 0.50 per domain |
 | Lambda, API Gateway, S3, SES, the 15 minute schedule | cents at personal volume |
 
 A new account may also get free tier credits that cover part of this. There is no NAT gateway,
@@ -481,6 +550,10 @@ aws cloudformation delete-stack --stack-name eisenmail-database
 ```bash
 aws cloudformation delete-stack --stack-name eisenmail-bootstrap
 ```
+
+Each domain stack (`eisenmail-domain-...`) can be deleted the same way. Its hosted zone and its
+SES identity are kept on purpose: deleting the zone takes the domain off the internet until the
+registrar points somewhere else. Delete them by hand once the domain has moved away.
 
 What is left on purpose, for you to delete by hand when you are sure: the four buckets (mail,
 files, public files, backups), the disk snapshots, and the parameters under `/eisenmail/` in SSM

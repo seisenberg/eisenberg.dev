@@ -248,9 +248,12 @@ the Python one forward; Dependabot does it weekly).
 
 ## Deploying
 
-[docs/SETUP.md](docs/SETUP.md) lists every step for a new AWS account: repository settings, three
-CloudFormation stacks (bootstrap, database, application), secrets, SES and DNS, the custom domain,
-and a checklist to confirm it works. After that, merging to `main` deploys. The database schema
+[docs/SETUP.md](docs/SETUP.md) lists every step for a new AWS account: repository settings, the
+CloudFormation stacks (bootstrap, database, application, and one per domain for its Route 53 zone,
+SES identity, mail records and certificate), secrets, and a checklist to confirm it works.
+[docs/MOVING-FROM-ANOTHER-ACCOUNT.md](docs/MOVING-FROM-ANOTHER-ACCOUNT.md) is for a domain whose
+mail and DNS already run somewhere else, including the name server change at the registrar.
+After that, merging to `main` deploys. The database schema
 migrates itself: the web function applies `db/schema.sql` at start-up when it has changed.
 
 | Workflow | When | What |
@@ -271,7 +274,7 @@ migrates itself: the web function applies `db/schema.sql` at start-up when it ha
 | `src/shared/api.ts` | types shared by server and UI |
 | `public/` | web app manifest, icons, `sw.js` |
 | `db/schema.sql` | the whole schema, idempotent |
-| `infra/` | `bootstrap.yml`, `database.yml`, `app.yml` (CloudFormation), `db-host.sh` (also prepares your own hardware) |
+| `infra/` | `bootstrap.yml`, `database.yml`, `app.yml`, `domain.yml` (CloudFormation), `db-host.sh` (also prepares your own hardware), `zone_copy.py` (copies an old DNS zone's records) |
 | `scripts/` | `dev.ts`, `seed.ts`, `set-user.ts`, `apply-schema.ts`, `push-keys.ts` |
 | `test/` | API integration tests, `e2e/` browser tests |
 

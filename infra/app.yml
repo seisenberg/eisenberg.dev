@@ -17,7 +17,7 @@ Metadata:
       - Label: { default: Your own database instead (only with UseDatabaseStack=false; leave TunnelHost empty for a direct connection) }
         Parameters: [TunnelHost, TunnelHostKey, DbHost, DbPort, DbSslMode]
       - Label: { default: Web site }
-        Parameters: [DomainName, CertificateArn, TrustedProxyHops]
+        Parameters: [DomainName, CertificateArn, HostedZoneId, TrustedProxyHops]
       - Label: { default: Push notifications (optional) }
         Parameters: [VapidPublicKey, VapidPrivateKeyParameter]
       - Label: { default: Images }
@@ -126,6 +126,14 @@ Parameters:
     Default: ""
     AllowedPattern: "^$|^arn:aws[a-zA-Z-]*:acm:[a-z0-9-]+:\\d{12}:certificate/.+$"
     Description: ACM certificate (in this region) covering DomainName. Required with DomainName.
+  HostedZoneId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^Z[A-Z0-9]+$"
+    Description: >-
+      Route 53 hosted zone of DomainName (the HostedZoneId output of its infra/domain.yml stack).
+      When given, the stack creates the record that points the domain at the site. Leave empty
+      if the domain's DNS is somewhere else and you add that record yourself.
   TrustedProxyHops:
     Type: Number
     Default: 1
@@ -145,6 +153,7 @@ Conditions:
   HasAlerts: !Not [!Equals [!Ref AlertEmail, ""]]
   HasBackupAlarm: !And [!Not [!Equals [!Ref AlertEmail, ""]], !Equals [!Ref UseDatabaseStack, "true"]]
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  HasDomainZone: !And [!Not [!Equals [!Ref DomainName, ""]], !Not [!Equals [!Ref HostedZoneId, ""]]]
   HasPush: !Not [!Equals [!Ref VapidPublicKey, ""]]
   HasOwnerAddresses: !Not [!Equals [!Ref OwnerAddresses, ""]]
   HasDefaultFrom: !Not [!Equals [!Ref DefaultFrom, ""]]
@@ -296,6 +305,20 @@ Resources:
       ApiId: !Ref HttpApi
       DomainName: !Ref HttpDomain
       Stage: $default
+
+  # The domain points at the site (an alias: no address to keep up to date, and it works at the
+  # top of a domain, where a CNAME is not allowed).
+  HttpDomainAlias:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomainZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt HttpDomain.RegionalDomainName
+        HostedZoneId: !GetAtt HttpDomain.RegionalHostedZoneId
+        EvaluateTargetHealth: false
 
   # ---- inbox: SES receiving -> S3 -> Lambda ---------------------------------------------------------
   InboxFunction:

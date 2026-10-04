@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  eisenmail, one stack PER DOMAIN: the Route 53 hosted zone, the SES identity that lets this
+  account receive and send mail for the domain, the DNS records mail needs (DKIM, MX, custom MAIL
+  FROM, DMARC) and, for the domain the site runs on, its TLS certificate. Contains no secrets.
+
+# Deploy as "<project>-domain-<domain with dashes>", for example eisenmail-domain-eisenberg-dev.
+# docs/SETUP.md step 9 has the commands; docs/MOVING-FROM-ANOTHER-ACCOUNT.md covers a domain
+# whose mail and DNS already live somewhere else.
+#
+# What this stack does NOT own, so that it never fights with records you add yourself:
+#   - the TXT record at the top of the domain (SPF for the bare domain, site verifications)
+#   - the A/AAAA records of the site (infra/app.yml creates those when given the HostedZoneId)
+#   - anything else in the zone
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Domain }
+        Parameters: [DomainName, HostedZoneId]
+      - Label: { default: Mail }
+        Parameters: [ReceiveMail, MailFromSubdomain, DmarcPolicy, DmarcReportAddress]
+      - Label: { default: Site }
+        Parameters: [Certificate]
+
+Parameters:
+  DomainName:
+    Type: String
+    AllowedPattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+    Description: The domain, in lower case, for example eisenberg.dev.
+  HostedZoneId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^Z[A-Z0-9]+$"
+    Description: >-
+      Leave empty and the stack creates the hosted zone (the usual case). To use a zone that
+      already exists in THIS account, give its id.
+  ReceiveMail:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      true creates the MX record that delivers the domain's mail to SES in this region. Nothing
+      changes for the outside world until the registrar points at this zone's name servers.
+  MailFromSubdomain:
+    Type: String
+    Default: mail
+    AllowedPattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+    Description: >-
+      Mail is sent with the envelope sender bounce address at <this>.<domain>, so that SPF lines
+      up with the domain (DMARC). The stack owns the MX and TXT records of that name.
+  DmarcPolicy:
+    Type: String
+    Default: quarantine
+    AllowedValues: [none, quarantine, reject]
+    Description: >-
+      What other mail systems should do with mail that claims to be from this domain and fails
+      authentication. Moving an existing domain: keep the policy it already has.
+  DmarcReportAddress:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    Description: Where the daily DMARC reports are sent. Empty means dmarc@<domain>, which lands in the webmail.
+  Certificate:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      true requests a TLS certificate for the domain (the site's domain only). Set it AFTER the
+      registrar points at this zone: the certificate is validated through DNS, and the stack
+      waits until that has happened.
+
+Conditions:
+  CreateZone: !Equals [!Ref HostedZoneId, ""]
+  WithInboundMx: !Equals [!Ref ReceiveMail, "true"]
+  WithCertificate: !Equals [!Ref Certificate, "true"]
+  DefaultReportAddress: !Equals [!Ref DmarcReportAddress, ""]
+
+Resources:
+  # Kept if the stack is ever deleted: a new zone would get new name servers, and the domain
+  # would be unreachable until the registrar is changed again.
+  Zone:
+    Type: AWS::Route53::HostedZone
+    Condition: CreateZone
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub "${DomainName} (eisenmail)"
+
+  # The right to receive and send for the domain in this account and region. SES proves it by
+  # finding the three DKIM records below in public DNS, so the identity turns "verified" only
+  # once the zone is live (or once the same three records exist in the DNS that is live today).
+  # Kept on stack deletion: a new identity would get new DKIM keys.
+  Identity:
+    Type: AWS::SES::EmailIdentity
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      EmailIdentity: !Ref DomainName
+      DkimAttributes:
+        SigningEnabled: true
+      DkimSigningAttributes:
+        NextSigningKeyLength: RSA_2048_BIT
+      MailFromAttributes:
+        MailFromDomain: !Sub "${MailFromSubdomain}.${DomainName}"
+        # If the MAIL FROM records are ever missing, send with the amazonses.com envelope sender
+        # instead of refusing to send.
+        BehaviorOnMxFailure: USE_DEFAULT_VALUE
+
+  Dkim1:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+      Name: !GetAtt Identity.DkimDNSTokenName1
+      Type: CNAME
+      TTL: "1800"
+      ResourceRecords: [!GetAtt Identity.DkimDNSTokenValue1]
+  Dkim2:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+      Name: !GetAtt Identity.DkimDNSTokenName2
+      Type: CNAME
+      TTL: "1800"
+      ResourceRecords: [!GetAtt Identity.DkimDNSTokenValue2]
+  Dkim3:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+      Name: !GetAtt Identity.DkimDNSTokenName3
+      Type: CNAME
+      TTL: "1800"
+      ResourceRecords: [!GetAtt Identity.DkimDNSTokenValue3]
+
+  # Receiving: the domain's mail goes to SES in this region.
+  InboundMx:
+    Type: AWS::Route53::RecordSet
+    Condition: WithInboundMx
+    Properties:
+      HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+      Name: !Ref DomainName
+      Type: MX
+      TTL: "300"
+      ResourceRecords: [!Sub "10 inbound-smtp.${AWS::Region}.amazonaws.com"]
+
+  # Sending: bounces come back to SES, and SPF for the envelope sender.
+  MailFromMx:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+      Name: !Sub "${MailFromSubdomain}.${DomainName}"
+      Type: MX
+      TTL: "300"
+      ResourceRecords: [!Sub "10 feedback-smtp.${AWS::Region}.amazonses.com"]
+  MailFromSpf:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+      Name: !Sub "${MailFromSubdomain}.${DomainName}"
+      Type: TXT
+      TTL: "300"
+      ResourceRecords: ['"v=spf1 include:amazonses.com ~all"']
+
+  Dmarc:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+      Name: !Sub "_dmarc.${DomainName}"
+      Type: TXT
+      TTL: "300"
+      ResourceRecords:
+        - !Sub
+          - '"v=DMARC1; p=${DmarcPolicy}; rua=mailto:${Reports}"'
+          - Reports: !If [DefaultReportAddress, !Sub "dmarc@${DomainName}", !Ref DmarcReportAddress]
+
+  # The site's certificate. ACM puts its validation record into the zone itself; it can only be
+  # seen, and the certificate issued, once the registrar points at this zone.
+  SiteCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: WithCertificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+
+Outputs:
+  HostedZoneId:
+    Description: The zone. Pass it to infra/app.yml as HostedZoneId for the domain the site runs on.
+    Value: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+  NameServers:
+    Condition: CreateZone
+    Description: Enter these four at the registrar as the domain's name servers.
+    Value: !Join [", ", !GetAtt Zone.NameServers]
+  CertificateArn:
+    Condition: WithCertificate
+    Description: Pass it to infra/app.yml as CertificateArn.
+    Value: !Ref SiteCertificate
+  MailFromDomain:
+    Value: !Sub "${MailFromSubdomain}.${DomainName}"
