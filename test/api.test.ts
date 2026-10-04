@@ -603,6 +603,47 @@ test('web app files are served', async () => {
   assert.ok(fs.existsSync('public/icons/apple-touch-icon.png'));
 });
 
+test('the www name redirects to the site, keeping path and query, and nothing else is served there', async () => {
+  const http = await import('node:http');
+  const { default: config } = await import('../src/server/config.js');
+  const target = new URL(base);
+  // fetch() does not let a test choose the Host header, so these requests are made by hand
+  const ask = (host: string, method: string, path: string) =>
+    new Promise<{ status: number; location: string | undefined; hsts: string | undefined; body: string }>((resolve, reject) => {
+      const req = http.request({ host: target.hostname, port: target.port, method, path, headers: { host, 'x-eisenmail': '1' } }, (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode!, location: res.headers.location, hsts: res.headers['x-content-type-options'] as string | undefined, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  const before = config.publicOrigin;
+  config.publicOrigin = 'https://site.example';
+  try {
+    const page = await ask('www.site.example', 'GET', '/mail?mailbox=inbox&q=a%20b');
+    assert.deepEqual([page.status, page.location, page.body], [301, 'https://site.example/mail?mailbox=inbox&q=a%20b', '']);
+    assert.equal(page.hsts, 'nosniff', 'the security headers are on the redirect too');
+    assert.equal((await ask('WWW.Site.Example', 'GET', '/')).location, 'https://site.example/');
+    // nothing behind it is reachable on the www name: not the API, not a sign-in attempt
+    assert.deepEqual([(await ask('www.site.example', 'GET', '/api/health')).status, (await ask('www.site.example', 'GET', '/api/auth/me')).status], [301, 301]);
+    const post = await ask('www.site.example', 'POST', '/api/auth/login');
+    assert.deepEqual([post.status, post.location], [308, 'https://site.example/api/auth/login']);
+    // the target is always this site: a path that looks like another host stays a path here
+    for (const path of ['//evil.example/x', '/\\evil.example', 'http://evil.example/x']) {
+      const location = (await ask('www.site.example', 'GET', path)).location!;
+      assert.equal(new URL(location).origin, 'https://site.example', path);
+    }
+    // the site itself, and any other name, are served as usual
+    assert.equal((await ask('site.example', 'GET', '/api/health')).status, 200);
+    assert.equal((await ask('www.other.example', 'GET', '/api/health')).status, 200);
+    assert.equal((await ask('wwww.site.example', 'GET', '/api/health')).status, 200);
+  } finally {
+    config.publicOrigin = before;
+  }
+  assert.equal((await ask('www.site.example', 'GET', '/api/health')).status, 200, 'no site address configured: no redirect');
+});
+
 // ================================================================================================
 // conversations, bulk read, contacts, drafts, settings, filters, retention, users, passkeys
 // ================================================================================================

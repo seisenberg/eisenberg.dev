@@ -10,7 +10,7 @@ Description: >-
 #
 # What this stack does NOT own, so that it never fights with records you add yourself:
 #   - the TXT record at the top of the domain (SPF for the bare domain, site verifications)
-#   - the A/AAAA records of the site (infra/app.yml creates those when given the HostedZoneId)
+#   - the address records of the site and of www (infra/app.yml creates those when given the HostedZoneId)
 #   - anything else in the zone
 
 Metadata:
@@ -66,9 +66,9 @@ Parameters:
     Default: "false"
     AllowedValues: ["true", "false"]
     Description: >-
-      true requests a TLS certificate for the domain (the site's domain only). Set it AFTER the
-      registrar points at this zone: the certificate is validated through DNS, and the stack
-      waits until that has happened.
+      true requests a TLS certificate for the domain and its www name (the site's domain only).
+      Set it AFTER the registrar points at this zone: the certificate is validated through DNS,
+      and the stack waits until that has happened.
 
 Conditions:
   CreateZone: !Equals [!Ref HostedZoneId, ""]
@@ -175,16 +175,20 @@ Resources:
           - '"v=DMARC1; p=${DmarcPolicy}; rua=mailto:${Reports}"'
           - Reports: !If [DefaultReportAddress, !Sub "dmarc@${DomainName}", !Ref DmarcReportAddress]
 
-  # The site's certificate. ACM puts its validation record into the zone itself; it can only be
+  # The site's certificate, for the domain and its www name. ACM puts its validation records into the zone itself; it can only be
   # seen, and the certificate issued, once the registrar points at this zone.
   SiteCertificate:
     Type: AWS::CertificateManager::Certificate
     Condition: WithCertificate
     Properties:
       DomainName: !Ref DomainName
+      # www.<domain> too: infra/app.yml answers there with a redirect to the site
+      SubjectAlternativeNames: [!Sub "www.${DomainName}"]
       ValidationMethod: DNS
       DomainValidationOptions:
         - DomainName: !Ref DomainName
+          HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
+        - DomainName: !Sub "www.${DomainName}"
           HostedZoneId: !If [CreateZone, !Ref Zone, !Ref HostedZoneId]
 
 Outputs:

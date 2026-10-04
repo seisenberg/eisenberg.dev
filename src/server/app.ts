@@ -109,6 +109,20 @@ export function createApp(options: AppOptions = {}): Koa {
     }
   });
 
+  // ---- www: the site under its "www." name answers with a permanent redirect to the real one ---
+  // Sessions, passkeys and the cross-site checks all belong to one origin, so the site lives on
+  // one name. The other one is not an error page: it sends people, and their bookmarks, on.
+  // The target is always this site's own origin; only the path and query of the request are kept.
+  app.use((ctx, next) => {
+    if (!config.publicOrigin) return next();
+    const site = new URL(config.publicOrigin);
+    if (ctx.get('host').toLowerCase() !== `www.${site.host}`) return next();
+    ctx.status = ctx.method === 'GET' || ctx.method === 'HEAD' ? 301 : 308;
+    ctx.set('Location', `${site.origin}${ctx.path.startsWith('/') ? ctx.path : '/'}${ctx.search}`);
+    ctx.set('Cache-Control', 'public, max-age=86400');
+    ctx.body = '';
+  });
+
   const json = bodyParser({ enableTypes: ['json'], jsonLimit: '6mb' });
   app.use((ctx, next) => (ctx.path.startsWith('/api/files/local-upload/') ? next() : json(ctx, next)));
 

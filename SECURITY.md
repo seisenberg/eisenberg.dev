@@ -50,6 +50,9 @@ reporting for this repository (Security tab, "Report a vulnerability"), or write
   every mail query, not in the interface: a message the member may not see answers "not found"
   whether it is read, changed, downloaded or replied to. Members cannot use the file drop, manage
   users, or change global settings. Owners can only be created from the command line.
+- The site is served on one name. Requests for its `www.` name get a permanent redirect whose
+  target is always the site's own origin, with only the path and query carried over, and nothing
+  else is reachable there: no API, no sign-in.
 - Session cookie flags: `__Host-eisenmail`, `HttpOnly`, `Secure`, `SameSite=Strict`. A session
   lasts 30 days from its last use (so a phone in regular use stays signed in) and is extended at
   most once a day. "Sign out other devices" and a password change end the others at once.

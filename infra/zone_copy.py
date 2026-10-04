@@ -15,7 +15,7 @@ Left out, because the new zone has its own or the stacks create them:
   - the MX record of the domain itself            (infra/domain.yml, ReceiveMail)
   - the _dmarc record                             (infra/domain.yml, DmarcPolicy)
   - the MX and TXT records of the MAIL FROM name  (infra/domain.yml, MailFromSubdomain)
-  - the A/AAAA records of the domain itself       (infra/app.yml; --with-site-address copies them)
+  - the address of the domain itself and of www   (infra/app.yml; --with-site-address copies them)
   - records tied to the old account (health checks, traffic policies)
 Everything else is copied as it is, including the TXT record at the top of the domain and the
 old account's DKIM records, which keep the old system working until you switch it off.
@@ -62,8 +62,8 @@ def plan(record_sets, domain, mail_from="mail", with_site_address=False, old_zon
             reason = "infra/domain.yml creates it (DmarcPolicy, DmarcReportAddress): keep the same policy"
         elif name == mail_from_name and kind in ("MX", "TXT"):
             reason = "infra/domain.yml creates the MAIL FROM records"
-        elif name == apex and kind in ("A", "AAAA") and not with_site_address:
-            reason = "infra/app.yml points the domain at the new site (--with-site-address copies it)"
+        elif name in (apex, "www." + apex) and kind in ("A", "AAAA", "CNAME") and not with_site_address:
+            reason = "infra/app.yml points the domain and www at the new site (--with-site-address copies it)"
         elif record.get("TrafficPolicyInstanceId"):
             reason = "made by a traffic policy of the old account: recreate it by hand if still needed"
         elif record.get("HealthCheckId"):
@@ -101,8 +101,8 @@ def main(argv=None) -> int:
     parser.add_argument("domain", help="the domain of the zone, for example example.com")
     parser.add_argument("--mail-from", default="mail", help="MailFromSubdomain of the domain stack (default: mail)")
     parser.add_argument("--with-site-address", action="store_true",
-                        help="also copy the A/AAAA records of the domain itself (the old site stays reachable; "
-                             "delete them before infra/app.yml is given the HostedZoneId)")
+                        help="also copy the address records of the domain itself and of www (the old site stays "
+                             "reachable; delete them before infra/app.yml is given the HostedZoneId)")
     parser.add_argument("--old-zone", help="id of the old zone, to rewrite aliases that point at its own records")
     parser.add_argument("--new-zone", help="id of the new zone (with --old-zone)")
     args = parser.parse_args(argv)

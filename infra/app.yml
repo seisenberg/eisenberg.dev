@@ -17,7 +17,7 @@ Metadata:
       - Label: { default: Your own database instead (only with UseDatabaseStack=false; leave TunnelHost empty for a direct connection) }
         Parameters: [TunnelHost, TunnelHostKey, DbHost, DbPort, DbSslMode]
       - Label: { default: Web site }
-        Parameters: [DomainName, CertificateArn, HostedZoneId, TrustedProxyHops]
+        Parameters: [DomainName, CertificateArn, HostedZoneId, WwwRedirect, TrustedProxyHops]
       - Label: { default: Push notifications (optional) }
         Parameters: [VapidPublicKey, VapidPrivateKeyParameter]
       - Label: { default: Images }
@@ -126,6 +126,14 @@ Parameters:
     Default: ""
     AllowedPattern: "^$|^arn:aws[a-zA-Z-]*:acm:[a-z0-9-]+:\\d{12}:certificate/.+$"
     Description: ACM certificate (in this region) covering DomainName. Required with DomainName.
+  WwwRedirect:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      With DomainName: also answer on www.<DomainName>, with a permanent redirect to the site.
+      The certificate must cover that name too (infra/domain.yml requests one that does). Set
+      false when DomainName is itself a subdomain, or the certificate is for one name only.
   HostedZoneId:
     Type: String
     Default: ""
@@ -154,6 +162,8 @@ Conditions:
   HasBackupAlarm: !And [!Not [!Equals [!Ref AlertEmail, ""]], !Equals [!Ref UseDatabaseStack, "true"]]
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
   HasDomainZone: !And [!Not [!Equals [!Ref DomainName, ""]], !Not [!Equals [!Ref HostedZoneId, ""]]]
+  HasWww: !And [!Not [!Equals [!Ref DomainName, ""]], !Equals [!Ref WwwRedirect, "true"]]
+  HasWwwZone: !And [!Not [!Equals [!Ref DomainName, ""]], !Equals [!Ref WwwRedirect, "true"], !Not [!Equals [!Ref HostedZoneId, ""]]]
   HasPush: !Not [!Equals [!Ref VapidPublicKey, ""]]
   HasOwnerAddresses: !Not [!Equals [!Ref OwnerAddresses, ""]]
   HasDefaultFrom: !Not [!Equals [!Ref DefaultFrom, ""]]
@@ -318,6 +328,44 @@ Resources:
       AliasTarget:
         DNSName: !GetAtt HttpDomain.RegionalDomainName
         HostedZoneId: !GetAtt HttpDomain.RegionalHostedZoneId
+        EvaluateTargetHealth: false
+
+  # www.<domain>: the same API under a second name. The server answers requests for that name
+  # with a permanent redirect to the site (src/server/app.ts), so bookmarks and typed addresses
+  # with "www." arrive where they should, over HTTPS, instead of at a certificate error.
+  HttpWwwDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasWww
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1030] # CertificateArn is empty only when this resource is not created
+    Properties:
+      DomainName: !Sub "www.${DomainName}"
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  HttpWwwDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasWww
+    DependsOn: HttpApiThrottle
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref HttpWwwDomain
+      Stage: $default
+
+  HttpWwwDomainAlias:
+    Type: AWS::Route53::RecordSet
+    Condition: HasWwwZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "www.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt HttpWwwDomain.RegionalDomainName
+        HostedZoneId: !GetAtt HttpWwwDomain.RegionalHostedZoneId
         EvaluateTargetHealth: false
 
   # ---- inbox: SES receiving -> S3 -> Lambda ---------------------------------------------------------
@@ -590,5 +638,9 @@ Outputs:
     Condition: HasDomain
     Description: Hosted zone id of DnsTarget, for a Route 53 alias record.
     Value: !GetAtt HttpDomain.RegionalHostedZoneId
+  WwwDnsTarget:
+    Condition: HasWww
+    Description: Point www.<DomainName> at this name (a CNAME), when the DNS is not in Route 53.
+    Value: !GetAtt HttpWwwDomain.RegionalDomainName
   ReceiptRuleSetName:
     Value: !Ref ReceiptRuleSet

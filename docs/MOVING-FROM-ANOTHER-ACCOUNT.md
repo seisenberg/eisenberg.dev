@@ -12,7 +12,7 @@ What to expect:
 
 - No mail is lost if you follow the order. Mail servers retry for days, and both accounts can
   receive during the change.
-- The site at the domain is unreachable from step 5 until step 6 is done (a few minutes of work,
+- The site at the domain (and at `www`) is unreachable from step 5 until step 6 is done (a few minutes of work,
   after the name servers have been picked up). Step 3 has an option that keeps the old site up
   in between.
 - Mail the OLD system stored is not moved by these steps. It stays in the old account until you
@@ -117,17 +117,17 @@ aws route53 change-resource-record-sets --profile new --hosted-zone-id $NEW_ZONE
 ```
 
 Left out on purpose: the records the new stacks create themselves (the domain's MX record,
-`_dmarc`, the `mail.` records) and the address of the old site.
+`_dmarc`, the `mail.` records) and the address of the old site, for the domain and for `www`.
 
 - **Keeping the old site reachable until the new one is live:** add `--with-site-address` to the
-  `zone_copy.py` command. Then, just before step 6 item 2, delete the domain's `A` record from
-  the new zone in the Route 53 console, because the application stack creates its own.
-- **`www`:** if the old zone has a `www` record that points at the bare domain, it is copied, but
-  the new site only answers on the bare domain. Delete it, or leave it and accept that
-  `www.` shows a certificate error.
+  `zone_copy.py` command. Then, just before step 6 item 1, delete the address records of the
+  domain and of `www` from the new zone in the Route 53 console, because the application stack
+  creates its own.
+- **`www`:** nothing to do. The new site answers on `www.` as well, with a redirect to the bare
+  domain, and the application stack creates that record in step 6.
 - **DNS at GoDaddy instead of Route 53:** export the zone file there (DNS, Actions, Export zone
   file), remove the lines for the domain's own `MX`, `_dmarc`, `mail` and (unless you want the
-  old site kept) `A` records, and import the rest in the Route 53 console (the new zone, Import
+  old site kept) the `A` and `www` records, and import the rest in the Route 53 console (the new zone, Import
   zone file).
 
 ## 4. Check the new zone before anyone uses it

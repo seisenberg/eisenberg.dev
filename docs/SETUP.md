@@ -405,9 +405,10 @@ Add these records at the DNS provider (use your region in the two host names):
 | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@eisenberg.dev` | DMARC |
 
 For the site (step 10), request the certificate yourself with
-`aws acm request-certificate --domain-name eisenberg.dev --validation-method DNS`, add the CNAME
-that `aws acm describe-certificate` shows, and point the domain at the `DnsTarget` output of the
-application stack (ALIAS/ANAME at the top of a domain, CNAME for a subdomain).
+`aws acm request-certificate --domain-name eisenberg.dev --subject-alternative-names www.eisenberg.dev --validation-method DNS`,
+add the CNAMEs that `aws acm describe-certificate` shows, and point the domain at the `DnsTarget`
+output of the application stack (ALIAS/ANAME at the top of a domain, CNAME for a subdomain) and
+`www` at its `WwwDnsTarget` output (a CNAME).
 
 </details>
 
@@ -416,8 +417,8 @@ application stack (ALIAS/ANAME at the top of a domain, CNAME for a subdomain).
 Do this once the registrar points at the zone (step 9, item 2): the certificate is validated
 through DNS, and `.dev` domains are only ever reached over HTTPS.
 
-1. Add the certificate to the domain's stack. The command returns when it has been issued,
-   usually within a few minutes:
+1. Add the certificate to the domain's stack (it covers the domain and its `www` name). The
+   command returns when it has been issued, usually within a few minutes:
 
    ```bash
    aws cloudformation deploy --stack-name eisenmail-domain-eisenberg-dev --template-file infra/domain.yml \
@@ -445,11 +446,15 @@ through DNS, and `.dev` domains are only ever reached over HTTPS.
      --capabilities CAPABILITY_NAMED_IAM --parameter-overrides SiteOrigins="https://eisenberg.dev"
    ```
 
-4. Open `https://eisenberg.dev/api/health`. Then add your passkeys again: a passkey belongs to
+4. Open `https://eisenberg.dev/api/health`, and `https://www.eisenberg.dev/`, which must land
+   on the bare domain. Then add your passkeys again: a passkey belongs to
    the site's address, so one made on the temporary address does not work here.
 
-Only the bare domain is served. If you want `www.eisenberg.dev` too, it needs its own
-certificate name and API mapping, which this setup does not create.
+`www.eisenberg.dev` works too: the certificate covers it, the application stack creates its
+record, and the site answers there with a permanent redirect to `https://eisenberg.dev`, keeping
+the path. The site itself lives on one name, because sign-ins and passkeys belong to one address.
+If `DomainName` is a subdomain (`mail.example.com`), add `WwwRedirect=false` to the command in
+item 2.
 
 ## 11. Phone
 

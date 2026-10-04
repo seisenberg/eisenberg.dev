@@ -47,7 +47,6 @@ def test_everything_the_stacks_do_not_own_is_copied_unchanged():
     assert names(changes) == [
         ("example.com.", "TXT"),                                  # the top-level TXT record is the owner's
         ("oldtoken1._domainkey.example.com.", "CNAME"),           # keeps the old account's SES identity verified
-        ("www.example.com.", "CNAME"),
         ("\\052.dev.example.com.", "A"),
         ("mailbox.example.com.", "MX"),                          # an MX below the domain is not ours
     ]
@@ -55,6 +54,7 @@ def test_everything_the_stacks_do_not_own_is_copied_unchanged():
     assert changes[0]["ResourceRecordSet"] == ZONE[3]
     assert sorted((r["Name"], r["Type"]) for r, _ in skipped) == sorted([
         ("example.com.", "NS"), ("example.com.", "SOA"), ("example.com.", "MX"), ("example.com.", "A"),
+        ("www.example.com.", "CNAME"),                            # the new site answers on www itself
         ("_dmarc.example.com.", "TXT"), ("mail.example.com.", "MX"), ("mail.example.com.", "TXT"),
     ])
     assert warnings == []
@@ -63,7 +63,7 @@ def test_everything_the_stacks_do_not_own_is_copied_unchanged():
 def test_the_site_address_and_another_mail_from_name_on_request():
     changes, skipped, _ = zone_copy.plan(ZONE, "example.com", mail_from="bounce", with_site_address=True)
     copied = names(changes)
-    assert ("example.com.", "A") in copied
+    assert ("example.com.", "A") in copied and ("www.example.com.", "CNAME") in copied
     assert ("mail.example.com.", "MX") in copied and ("mail.example.com.", "TXT") in copied
     assert ("example.com.", "MX") not in copied and ("example.com.", "NS") not in copied
 
@@ -71,8 +71,8 @@ def test_the_site_address_and_another_mail_from_name_on_request():
 def test_aliases():
     zone = [
         alias("cdn.example.com.", "A", "d111.cloudfront.net.", "Z2FDTNDATAQYW2"),         # a resource: copied as is
-        alias("shop.example.com.", "A", "www.example.com.", OLD),                          # a record of the old zone
-        rr("www.example.com.", "A", "203.0.113.10"),
+        alias("shop.example.com.", "A", "web.example.com.", OLD),                          # a record of the old zone
+        rr("web.example.com.", "A", "203.0.113.10"),
     ]
     changes, _, warnings = zone_copy.plan(zone, "example.com", old_zone=OLD, new_zone=NEW)
     by_name = {c["ResourceRecordSet"]["Name"]: c["ResourceRecordSet"] for c in changes}
@@ -104,7 +104,7 @@ def test_command_line(monkeypatch, capsys):
     assert zone_copy.main(["example.com"]) == 0
     out, err = capsys.readouterr()
     batch = json.loads(out)
-    assert len(batch["Changes"]) == 5 and "left out" in err and "_dmarc.example.com." in err
+    assert len(batch["Changes"]) == 4 and "left out" in err and "_dmarc.example.com." in err
 
     monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     assert zone_copy.main(["example.com"]) == 2
