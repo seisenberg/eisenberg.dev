@@ -1,6 +1,6 @@
 """Opt-in: db.Database against a real Postgres with db/schema.sql applied.
 
-    EISENMAIL_TEST_DSN=postgresql://user:pw@127.0.0.1:5432/throwaway .venv/bin/python -m pytest -q tests/test_db_integration.py
+    EISENMAIL_TEST_DSN=postgresql://user:pw@127.0.0.1:5432/throwaway uv run pytest -q tests/test_db_integration.py
 
 Use a THROWAWAY database: the schema is applied to it (idempotent) and rows are inserted and
 deleted. Skipped when EISENMAIL_TEST_DSN is not set.

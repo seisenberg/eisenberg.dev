@@ -25,7 +25,8 @@ updates:
         applies-to: security-updates
         patterns: ["*"]
 
-  - package-ecosystem: pip
+  # py/pyproject.toml and py/uv.lock
+  - package-ecosystem: uv
     directory: /py
     schedule:
       interval: weekly

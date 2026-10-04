@@ -221,7 +221,8 @@ Found a problem? See the reporting section of [SECURITY.md](SECURITY.md).
 
 ## Run it locally
 
-Needs Node 26 or later. No Docker, no AWS account, no system PostgreSQL.
+Needs Node 26 or later, and [uv](https://docs.astral.sh/uv/) for the Python tests (it fetches
+Python 3.14 itself). No Docker, no AWS account, no system PostgreSQL.
 
 ```bash
 npm install
@@ -238,8 +239,12 @@ npm test            # API integration tests against a real PostgreSQL
 npm run test:e2e    # browser tests (desktop and phone) against the production build; needs Chrome
 npm run typecheck
 npm run build       # dist/ (UI) and build/ (server)
-cd py && uv venv --python 3.14 .venv && uv pip install -r requirements-dev.txt && .venv/bin/python -m pytest -q
+cd py && uv run pytest -q   # the inbox function; installs the locked versions on first use
 ```
+
+Both sides install exact, locked versions: `package-lock.json` for Node, `py/uv.lock` for Python.
+The container images and CI install from the same lock files (`uv lock --upgrade` in `py/` moves
+the Python one forward; Dependabot does it weekly).
 
 ## Deploying
 
@@ -254,13 +259,13 @@ migrates itself: the web function applies `db/schema.sql` at start-up when it ha
 | [Deploy](.github/workflows/deploy.yml) | `main` | tests, then build, push, update both functions through OIDC |
 | [CodeQL](.github/workflows/codeql.yml) | pull requests, `main`, weekly | static analysis of TypeScript, Python and the workflows |
 | [Dependency review](.github/workflows/dependency-review.yml) | pull requests | blocks newly added vulnerable dependencies |
-| [Dependabot](.github/dependabot.yml) | weekly | npm, pip, base images, pinned actions |
+| [Dependabot](.github/dependabot.yml) | weekly | npm, Python (uv), base images, pinned actions |
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `py/` | inbox lambda: `inbox.py` (handler), `relay.py` (message rewriting), `reconcile.py` (replay from S3), `push.py`, `db.py`, `config.py`, `tests/` |
+| `py/` | inbox lambda: `inbox.py` (handler), `relay.py` (message rewriting), `reconcile.py` (replay from S3), `push.py`, `db.py`, `config.py`, `tests/`, `pyproject.toml` and `uv.lock` (dependencies) |
 | `src/server/` | web lambda: `app.ts` (routes, headers), `auth.ts`, `passkeys.ts`, `users.ts`, `mail.ts`, `ingest.ts`, `send.ts`, `rules.ts`, `settings.ts`, `push.ts`, `files.ts`, `schema.ts`, `db.ts` |
 | `src/ui/` | `pages/` (portfolio, sign-in), `mail/`, `files/`, `settings/`, `components/ui/` (shadcn) |
 | `src/shared/api.ts` | types shared by server and UI |

@@ -76,13 +76,15 @@ jobs:
           version=$(sed -n 's/^FROM python:\([0-9][0-9.]*\).*/\1/p' Dockerfile.python | head -n 1)
           test -n "$version"
           echo "python=$version" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: ${{ steps.runtime.outputs.python }}
-          cache: pip
-          cache-dependency-path: py/requirements*.txt
-      - run: pip install -r py/requirements-dev.txt
-      - run: python -m pytest -q
+          working-directory: py
+      # --locked: exactly the versions in py/uv.lock, and a failure if the lock file does not
+      # match pyproject.toml. The container image is built from the same lock file.
+      - run: uv sync --locked
+        working-directory: py
+      - run: uv run --locked pytest -q
         working-directory: py
 
   images:
@@ -117,9 +119,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: "3.x" # only runs the linter: the newest stable Python
-      - run: pip install cfn-lint==1.* && cfn-lint infra/*.yml
+          enable-cache: false # one small tool, nothing worth caching
+      - run: uvx --from 'cfn-lint==1.*' cfn-lint infra/*.yml
       - name: Shell scripts
         run: bash -n infra/db-host.sh && shellcheck infra/db-host.sh

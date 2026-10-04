@@ -1,0 +1,36 @@
+# The eisenmail inbound Lambda (SES receipt rule -> S3 -> inbox.lambda_handler).
+#
+# Dependencies are managed with uv. The exact versions of everything, transitive packages
+# included, are in uv.lock; the container image and CI install exactly that.
+#
+#   uv sync                 create .venv with the locked versions (and pytest)
+#   uv run pytest -q        run the tests
+#   uv lock --upgrade       move the lock file to the newest versions the ranges allow
+[project]
+name = "eisenmail-inbox"
+version = "0.2.0"
+description = "eisenmail inbound mail: forward, reply relay, push notifications"
+# The interpreter itself comes from the base image in Dockerfile.python; CI reads it from there.
+requires-python = ">=3.14"
+dependencies = [
+    "boto3>=1.43.108,<2",
+    "psycopg[binary]>=3.3.6,<4",
+    # Only needed when SSH_TUNNEL_HOST is set. The tunnel is implemented directly on paramiko
+    # (see db.py), so there is no sshtunnel dependency.
+    "paramiko>=5.0.0,<6",
+    # Web Push notifications (push.py); imported lazily, only used when a VAPID key is configured.
+    "pywebpush>=2.5.0,<3",
+    # Lambda runtime interface client: only exists (and is only needed) inside the container.
+    "awslambdaric>=4.1,<5; sys_platform == 'linux'",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1,<10"]
+
+[tool.uv]
+# Flat modules next to this file, not an installable package: only the dependencies are installed.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
