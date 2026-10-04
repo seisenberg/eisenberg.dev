@@ -1,6 +1,6 @@
 # Runtime dependencies of the eisenmail inbound Lambda (py/).
-boto3>=1.43.106,<2
-psycopg[binary]>=3.2,<4
+boto3>=1.35,<2
+psycopg[binary]>=3.3.6,<4
 # Only needed when SSH_TUNNEL_HOST is set. The tunnel is implemented directly on
 # paramiko (see db.py), so there is no sshtunnel dependency and no old-paramiko pin.
 paramiko>=5.0.0,<6
