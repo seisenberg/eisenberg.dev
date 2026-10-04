@@ -1,6 +1,14 @@
 # Keeps every dependency surface current: npm, Python, the container base images and the pinned
-# GitHub Actions. Minor and patch updates arrive as one grouped pull request per ecosystem per
-# week; majors arrive on their own so they can be read. Security updates are raised immediately.
+# GitHub Actions.
+#
+# Every pull request runs the full Tests and CodeQL workflows, so updates are grouped to keep the
+# number of runs down: at most ONE pull request per ecosystem per week, with every update type in
+# it (major, minor and patch). Security fixes are grouped the same way, but are raised as soon as
+# they are known instead of waiting for Monday.
+#
+# The price of grouping: one update that breaks the tests holds back the others in its pull
+# request. Comment "@dependabot ignore <dependency> major version" on it (or "... this
+# dependency") and Dependabot rebuilds the pull request without that update.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -8,10 +16,14 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     groups:
-      npm-minor-and-patch:
-        update-types: [minor, patch]
+      npm:
+        applies-to: version-updates
+        patterns: ["*"]
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: pip
     directory: /py
@@ -19,8 +31,12 @@ updates:
       interval: weekly
       day: monday
     groups:
-      python-minor-and-patch:
-        update-types: [minor, patch]
+      python:
+        applies-to: version-updates
+        patterns: ["*"]
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   # The base images carry the language runtimes (Node, Python). A new runtime version is proposed
   # once it has been out for three weeks, and the Tests workflow then runs on that version,
@@ -36,6 +52,9 @@ updates:
     ignore:
       - dependency-name: node
         versions: ["27.x", "29.x", "31.x", "33.x"]
+    groups:
+      base-images:
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: /
