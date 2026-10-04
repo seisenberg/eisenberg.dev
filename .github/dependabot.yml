@@ -22,11 +22,20 @@ updates:
       python-minor-and-patch:
         update-types: [minor, patch]
 
+  # The base images carry the language runtimes (Node, Python). A new runtime version is proposed
+  # once it has been out for three weeks, and the Tests workflow then runs on that version,
+  # because it reads the version from the Dockerfiles. Odd Node majors never become long-term
+  # releases, so they are skipped. The Debian release in the tag (trixie) is changed by hand.
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 21
+    ignore:
+      - dependency-name: node
+        versions: ["27.x", "29.x", "31.x", "33.x"]
 
   - package-ecosystem: github-actions
     directory: /

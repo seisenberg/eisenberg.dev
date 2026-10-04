@@ -2,7 +2,7 @@
 # No secrets are baked into this image. The ssh tunnel key (if a tunnel is used) is read at
 # runtime from SSM Parameter Store (SSH_TUNNEL_KEY_SSM).
 
-FROM node:24-trixie-slim AS build
+FROM node:26-trixie-slim AS build
 WORKDIR /opt/eisenmail
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -11,7 +11,7 @@ COPY public ./public
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
-FROM node:24-trixie-slim
+FROM node:26-trixie-slim
 WORKDIR /opt/eisenmail
 # RDS CA bundle: only needed when connecting straight to RDS with POSTGRES_DB_SSLMODE=verify-full.
 ADD --chmod=644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /opt/eisenmail/global-bundle.pem

@@ -46,7 +46,7 @@ backups that can be restored anywhere.
 
 | Layer | Choices |
 | --- | --- |
-| Receiving | SES receipt rule, S3, Python 3.13 Lambda container |
+| Receiving | SES receipt rule, S3, Python 3.14 Lambda container |
 | Web | Koa on the AWS Lambda Web Adapter, API Gateway HTTP API |
 | UI | React 19, Tailwind 4, shadcn/ui on Radix, TanStack Query, no client-side state library |
 | Data | PostgreSQL on a tiny EC2 instance, reached through an ssh tunnel that can only forward one port |
@@ -221,7 +221,7 @@ Found a problem? See the reporting section of [SECURITY.md](SECURITY.md).
 
 ## Run it locally
 
-Needs Node 22 or later. No Docker, no AWS account, no system PostgreSQL.
+Needs Node 26 or later. No Docker, no AWS account, no system PostgreSQL.
 
 ```bash
 npm install
@@ -238,7 +238,7 @@ npm test            # API integration tests against a real PostgreSQL
 npm run test:e2e    # browser tests (desktop and phone) against the production build; needs Chrome
 npm run typecheck
 npm run build       # dist/ (UI) and build/ (server)
-cd py && uv venv .venv && uv pip install -r requirements-dev.txt && .venv/bin/python -m pytest -q
+cd py && uv venv --python 3.14 .venv && uv pip install -r requirements-dev.txt && .venv/bin/python -m pytest -q
 ```
 
 ## Deploying

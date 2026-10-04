@@ -40,9 +40,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # One source of truth: the tests run on the Node version the container image is built from.
+      # When Dependabot moves the image to a new Node, this job tests that version in the same PR.
+      - name: Node version of the container image
+        id: runtime
+        run: |
+          version=$(sed -n 's/^FROM node:\([0-9][0-9.]*\).*/\1/p' Dockerfile.node | head -n 1)
+          test -n "$version"
+          echo "node=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: ${{ steps.runtime.outputs.node }}
           cache: npm
       - run: npm ci
       - run: npm run typecheck
@@ -61,9 +69,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The Python version the container image is built from (see the Node job).
+      - name: Python version of the container image
+        id: runtime
+        run: |
+          version=$(sed -n 's/^FROM python:\([0-9][0-9.]*\).*/\1/p' Dockerfile.python | head -n 1)
+          test -n "$version"
+          echo "python=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: ${{ steps.runtime.outputs.python }}
           cache: pip
           cache-dependency-path: py/requirements*.txt
       - run: pip install -r py/requirements-dev.txt
@@ -104,7 +119,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.x" # only runs the linter: the newest stable Python
       - run: pip install cfn-lint==1.* && cfn-lint infra/*.yml
       - name: Shell scripts
         run: bash -n infra/db-host.sh && shellcheck infra/db-host.sh
