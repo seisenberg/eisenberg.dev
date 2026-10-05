@@ -12,6 +12,20 @@ Parameters:
     Type: String
     Default: seisenberg/eisenberg.dev
     Description: owner/name of the repository allowed to deploy.
+  GitHubOwnerId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[0-9]+$"
+    Description: >-
+      Numeric id of the repository's owner. Required, together with GitHubRepositoryId, for a
+      repository created, renamed or transferred after 15 July 2026: GitHub identifies those to
+      AWS by name AND id. Both ids are public: docs/SETUP.md step 3 shows how to read them.
+      Leave both empty only for an older repository that still uses names alone.
+  GitHubRepositoryId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[0-9]+$"
+    Description: Numeric id of the repository (see GitHubOwnerId).
   GitHubEnvironment:
     Type: String
     Default: production
@@ -31,8 +45,21 @@ Parameters:
     MinValue: 1
     Description: Raw mail objects written by SES are deleted after this many days (the database keeps the mail).
 
+Rules:
+  BothIdsOrNeither:
+    RuleCondition: !Not [!Equals [!Ref GitHubOwnerId, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref GitHubRepositoryId, ""]]
+        AssertDescription: Give GitHubRepositoryId together with GitHubOwnerId.
+  NeitherOrBothIds:
+    RuleCondition: !Not [!Equals [!Ref GitHubRepositoryId, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref GitHubOwnerId, ""]]
+        AssertDescription: Give GitHubOwnerId together with GitHubRepositoryId.
+
 Conditions:
   CreateOidc: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+  SubjectWithIds: !Not [!Equals [!Ref GitHubRepositoryId, ""]]
 
 Resources:
   # ---- GitHub Actions: short-lived credentials through OIDC, no stored keys --------------------
@@ -61,8 +88,18 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                # exactly this repository AND this environment; nothing from forks or other branches
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepository}:environment:${GitHubEnvironment}"
+                # Exactly this repository AND this environment; nothing from forks or other branches.
+                # With the ids, the form GitHub uses for repositories created after 15 July 2026:
+                #   repo:<owner>@<owner id>/<name>@<repository id>:environment:<environment>
+                # The ids never change hands, so somebody who later registers the same owner and
+                # repository NAME cannot pass as this repository. Without them, the older form.
+                token.actions.githubusercontent.com:sub: !If
+                  - SubjectWithIds
+                  - !Sub
+                    - "repo:${Owner}@${GitHubOwnerId}/${Name}@${GitHubRepositoryId}:environment:${GitHubEnvironment}"
+                    - Owner: !Select [0, !Split ["/", !Ref GitHubRepository]]
+                      Name: !Select [1, !Split ["/", !Ref GitHubRepository]]
+                  - !Sub "repo:${GitHubRepository}:environment:${GitHubEnvironment}"
       Policies:
         - PolicyName: deploy
           PolicyDocument:
@@ -346,6 +383,15 @@ Outputs:
   DeployRoleArn:
     Description: Set as the GitHub variable AWS_DEPLOY_ROLE_ARN.
     Value: !GetAtt DeployRole.Arn
+  DeployRoleSubject:
+    Description: The identity a GitHub Actions job must present to use the deploy role (the token's "sub" claim).
+    Value: !If
+      - SubjectWithIds
+      - !Sub
+        - "repo:${Owner}@${GitHubOwnerId}/${Name}@${GitHubRepositoryId}:environment:${GitHubEnvironment}"
+        - Owner: !Select [0, !Split ["/", !Ref GitHubRepository]]
+          Name: !Select [1, !Split ["/", !Ref GitHubRepository]]
+      - !Sub "repo:${GitHubRepository}:environment:${GitHubEnvironment}"
   RegistryUri:
     Value: !GetAtt Registry.RepositoryUri
     Export: { Name: !Sub "${ProjectName}-registry-uri" }

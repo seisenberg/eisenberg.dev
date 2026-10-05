@@ -53,12 +53,23 @@ Do this before anything else. The repository is public, so its settings are part
 
 ## 3. Deploy the bootstrap stack
 
+GitHub proves to AWS which repository a deploy comes from, and for repositories created after
+15 July 2026 that proof contains the numeric ids of the owner and of the repository as well as
+their names. Read the two ids (they are public):
+
+```bash
+curl -s https://api.github.com/repos/seisenberg/eisenberg.dev | python3 -c "import json,sys; d=json.load(sys.stdin); print('GitHubOwnerId=%s GitHubRepositoryId=%s' % (d['owner']['id'], d['id']))"
+```
+
+Put what it prints into the command:
+
 ```bash
 aws cloudformation deploy \
   --stack-name eisenmail-bootstrap \
   --template-file infra/bootstrap.yml \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides GitHubRepository=seisenberg/eisenberg.dev SiteOrigins=https://eisenberg.dev
+  --parameter-overrides GitHubRepository=seisenberg/eisenberg.dev SiteOrigins=https://eisenberg.dev \
+    GitHubOwnerId=<number> GitHubRepositoryId=<number>
 ```
 
 ```bash
@@ -80,6 +91,14 @@ Keep the output on screen: you need `DeployRoleArn` next.
 2. **Actions, Deploy, Run workflow** on `main`. If you added a required reviewer, approve it.
    It runs the tests, builds both images and pushes them. The last step prints a notice that the
    functions do not exist yet. That is expected on this first run.
+
+   If the run stops at "configure-aws-credentials" with `Not authorized to perform
+   sts:AssumeRoleWithWebIdentity`, AWS did not recognise the repository. Compare the
+   `DeployRoleSubject` output of the bootstrap stack with the repository: the owner and name
+   must be spelled exactly as on GitHub, the two ids must be the ones the command in step 3
+   printed (a repository that is renamed or transferred gets the id form too), and the
+   environment must be `production`. Fix the parameters, run the step 3 command again, and
+   re-run the workflow.
 
 ## 5. Database
 
