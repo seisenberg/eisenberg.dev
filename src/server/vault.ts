@@ -99,13 +99,10 @@ function checked(p: ParsedOtp): ParsedOtp {
  */
 export function parseSetupCode(input: string): ParsedOtp[] {
   const uri = input.trim();
-  const parsers = new Map<string, (uri: string) => ParsedOtp[]>([
-    ['otpauth:', (u) => [parseOtpauth(u)]],
-    ['otpauth-migration:', parseMigration],
-  ]);
-  const parse = parsers.get(uri.slice(0, uri.indexOf(':') + 1).toLowerCase());
-  if (!parse) throw new HttpError(400, 'That is not an authenticator setup code');
-  return parse(uri).map(checked);
+  const scheme = uri.slice(0, uri.indexOf(':') + 1).toLowerCase();
+  if (scheme !== 'otpauth:' && scheme !== 'otpauth-migration:') throw new HttpError(400, 'That is not an authenticator setup code');
+  const accounts = scheme === 'otpauth-migration:' ? parseMigration(uri) : [parseOtpauth(uri)];
+  return accounts.map(checked);
 }
 
 /** otpauth://totp/Issuer:account?secret=BASE32&issuer=Issuer&algorithm=SHA1&digits=6&period=30 (what a setup QR code contains) */
