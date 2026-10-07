@@ -408,8 +408,12 @@ const EMAIL_CODE_TRIES = 5;
 /** The mailbox must not be one this system receives for: the code would arrive in the webmail being signed in to. */
 export function outsideAddress(input: unknown): string {
   const email = String(input ?? '').trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(400, 'That is not a valid email address');
-  const domain = email.slice(email.lastIndexOf('@') + 1);
+  // checked by hand, in one pass, so that a long input cannot keep a regular expression busy
+  const at = email.indexOf('@');
+  const domain = email.slice(at + 1);
+  const dot = domain.lastIndexOf('.');
+  const valid = email.length <= 254 && at > 0 && email.indexOf('@', at + 1) < 0 && dot > 0 && dot < domain.length - 1 && !/[\s<>(),;:"\\]/.test(email);
+  if (!valid) throw new HttpError(400, 'That is not a valid email address');
   if (config.mail.domains.includes(domain)) throw new HttpError(400, `Use a mailbox outside this system. Mail for ${domain} is delivered here, so the code would be locked in with you.`);
   return email;
 }

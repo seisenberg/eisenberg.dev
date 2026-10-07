@@ -431,6 +431,8 @@ test('a hostile message cannot stall or slow mail indexing', async () => {
   assert.equal((await call('GET', '/api/mail/messages?mailbox=inbox&limit=abc')).status, 200);
 
   assert.equal(htmlToText('<style>p{}</style><p>Hello&nbsp;<b>world</b> &amp; &#x263A;</p><script>x</script><div>next</div>'), 'Hello world & \u263a\nnext');
+  // tags split by other tags do not reassemble into markup
+  assert.ok(!htmlToText('a<scr<b>ipt>alert(1)</scr</b>ipt>b <img src=x onerror=1> c').includes('<'));
   assert.equal(clean('a\u0000b\ud800c'), 'ab\ufffdc');
 });
 
@@ -1124,7 +1126,7 @@ test('authenticator: secrets are stored encrypted, only codes come back, each us
   assert.equal((await call('POST', '/api/codes', { uris: [migration] })).json.added, 2);
   assert.equal((await call('POST', '/api/codes', { manual: { issuer: 'Bank', account: 'sam', secret: 'jbsw y3dp ehpk 3pxp jbsw y3dp ehpk 3pxp' } })).json.added, 1);
 
-  for (const bad of [{ uris: ['https://example.org'] }, { uris: ['otpauth://hotp/X?secret=JBSWY3DPEHPK3PXP&counter=1'] }, { uris: ['otpauth://totp/X?secret=AA'] }, { manual: { secret: 'short' } }, {}, { uris: ['otpauth-migration://offline?data=%%%'] }, { uris: ['otpauth://totp/Acme%ZZ:me?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP'] }]) {
+  for (const bad of [{ uris: ['https://example.org'] }, { uris: ['otpauth://hotp/X?secret=JBSWY3DPEHPK3PXP&counter=1'] }, { uris: ['otpauth://totp/X?secret=AA'] }, { manual: { secret: 'short' } }, {}, { uris: ['otpauth-migration://offline?data=%%%'] }, { uris: ['otpauth://totp/Acme%ZZ:me?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP'] }, { uris: [''] }, { uris: ['mailto:x@y.example'] }, { uris: ['OTPAUTH-MIGRATION://offline?data=%%%'] }]) {
     assert.equal((await call('POST', '/api/codes', bad)).status, 400, JSON.stringify(bad));
   }
 
@@ -1157,7 +1159,11 @@ test('sign-in code by email: required after the password, single use, and a fres
   const mailsTo = (address: string) => sent.filter((m) => m.to.includes(address));
 
   // the mailbox must be outside this system, and the password is needed to set it
-  assert.equal((await call('POST', '/api/auth/email-check/start', { email: 'me@eisenberg.dev', currentPassword: DEV_USER.password })).status, 400);
+  for (const bad of ['me@eisenberg.dev', 'me', 'me@host', '@host.example', 'me@.example', 'me@host.', 'me@@host.example', 'me x@host.example', `${'a'.repeat(250)}@host.example`, 'me@' + 'b.'.repeat(5000) + 'c']) {
+    const started = Date.now();
+    assert.equal((await call('POST', '/api/auth/email-check/start', { email: bad, currentPassword: DEV_USER.password })).status, 400, bad.slice(0, 40));
+    assert.ok(Date.now() - started < 2000, 'refused at once, however long the input');
+  }
   assert.equal((await call('POST', '/api/auth/email-check/start', { email: 'me@private.example', currentPassword: 'wrong-wrong-wrong' })).status, 403);
   const started = await call('POST', '/api/auth/email-check/start', { email: 'Me@Private.example', currentPassword: DEV_USER.password });
   assert.deepEqual(started.json, { sentTo: 'm•••@private.example' });

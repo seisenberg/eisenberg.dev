@@ -231,9 +231,10 @@ export async function addEntries(v: Viewer, body: { uris?: unknown; manual?: unk
     if (body.uris.length > 50) throw new HttpError(400, 'Too many codes at once');
     for (const item of body.uris) {
       const uri = String(item).trim();
-      if (!uri) continue;
-      if (/^otpauth-migration:/i.test(uri)) parsed.push(...parseMigration(uri));
-      else parsed.push(parseOtpauth(uri));
+      const scheme = uri.slice(0, uri.indexOf(':') + 1).toLowerCase();
+      if (scheme === 'otpauth-migration:') parsed.push(...parseMigration(uri));
+      else if (scheme === 'otpauth:') parsed.push(parseOtpauth(uri));
+      else throw new HttpError(400, 'That is not an authenticator setup code');
     }
   }
   if (body?.manual && typeof body.manual === 'object') {

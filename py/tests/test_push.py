@@ -248,7 +248,7 @@ def test_other_failures_increment_failure_count(db, answer, caplog):
     assert counts == {"sent": 1, "gone": 0, "failed": 1, "skipped": 0, "filtered": 0}
     assert db.push_subscriptions[FCM]["failure_count"] == 3 and db.push_subscriptions[FCM]["last_success_at"] is None
     assert db.push_subscriptions[MOZILLA]["failure_count"] == 0
-    assert "fcm.googleapis.com" in caplog.text
+    assert any(record.args and record.args[0] == "fcm.googleapis.com" for record in caplog.records)
     for secret in ("SECRET-PATH", "PAYLOAD-TEXT", VAPID_KEY, "p256dh-key", "auth-secret", "timed out", "bad p256dh"):
         assert secret not in caplog.text
 

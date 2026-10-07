@@ -115,7 +115,8 @@ export async function imageLinks(v: Viewer, id: unknown, urlsInput: unknown): Pr
   if (!Array.isArray(urlsInput) || urlsInput.length > 300) throw new HttpError(400, 'urls must be a list of at most 300 addresses');
   const message = await getMessage(v, id);
   const html = message.html ?? '';
-  const out: Record<string, string> = {};
+  // keyed by strings the sender chose ("__proto__" included): a Map, turned into a plain object at the end
+  const out = new Map<string, string>();
   for (const item of urlsInput) {
     const original = String(item);
     const url = fetchable(original);
@@ -124,9 +125,9 @@ export async function imageLinks(v: Viewer, id: unknown, urlsInput: unknown): Pr
     const present = html.includes(original) || html.includes(original.replace(/&/g, '&amp;'));
     if (!present) continue;
     const href = url.toString();
-    out[original] = `/api/mail/image/${await sign(href)}/${Buffer.from(href).toString('base64url')}`;
+    out.set(original, `/api/mail/image/${await sign(href)}/${Buffer.from(href).toString('base64url')}`);
   }
-  return out;
+  return Object.fromEntries(out);
 }
 
 // ---- fetching ---------------------------------------------------------------------------------------------

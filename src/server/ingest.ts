@@ -73,9 +73,15 @@ export function htmlToText(html: string): string {
       from = start;
     }
   }
+  h = h.replace(/<(?:br|\/p|\/div|\/tr|\/li|\/h[1-6]|\/blockquote)\b[^>]*>/gi, '\n');
+  // Tags are removed until none is left: one pass would turn "<scr<b>ipt>" into "<script>". The
+  // text only ever becomes a snippet, search text or a quote, never markup, but it should not
+  // carry tag-shaped fragments either. The input is capped, so this ends quickly.
+  for (let previous = ''; previous !== h; ) {
+    previous = h;
+    h = h.replace(/<[^>]*>/g, '');
+  }
   return h
-    .replace(/<(?:br|\/p|\/div|\/tr|\/li|\/h[1-6]|\/blockquote)\b[^>]*>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
     .replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z]{2,6});/gi, (m, e: string) => {
       const key = e.toLowerCase();
       if (key in ENTITIES) return ENTITIES[key];

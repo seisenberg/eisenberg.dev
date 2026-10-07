@@ -44,7 +44,7 @@ const frameInfo = () =>
       sandbox: f.getAttribute('sandbox') ?? '',
       srcdoc: f.srcdoc,
       active: d.querySelectorAll('script, form, input, iframe, object, embed, meta[http-equiv=refresh], [onerror], [onclick], [onload]').length,
-      jsLinks: [...d.querySelectorAll('a')].filter((a) => (a.getAttribute('href') ?? '').trim().toLowerCase().startsWith('javascript:')).length,
+      jsLinks: [...d.querySelectorAll('a')].filter((a) => /^(javascript|data|vbscript|file):/i.test((a.getAttribute('href') ?? '').replace(/[\s\u0000-\u001f]/g, ''))).length,
       images: [...d.querySelectorAll('img')].map((i) => {
         const r = i.getBoundingClientRect();
         return { src: i.getAttribute('src') ?? '', blocked: i.hasAttribute('data-blocked'), width: Math.round(r.width), height: Math.round(r.height), loaded: i.complete && i.naturalWidth > 0 };

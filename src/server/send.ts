@@ -29,7 +29,8 @@ export interface Transport {
 const mockTransport: Transport = {
   async send(raw, from, to) {
     const id = `mock-${crypto.randomUUID()}`;
-    console.log(`[mock mail] ${from} -> ${to.join(', ')} (${raw.length} bytes) id=${id}`);
+    // addresses are shown JSON-quoted: a line break or control character cannot forge a log line
+    console.log(`[mock mail] ${JSON.stringify(from)} -> ${JSON.stringify(to)} (${raw.length} bytes) id=${id}`);
     return id;
   },
 };
