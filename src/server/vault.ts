@@ -92,6 +92,22 @@ function checked(p: ParsedOtp): ParsedOtp {
   return { ...p, issuer: label(p.issuer), account: label(p.account) };
 }
 
+/**
+ * Any code the user can give: a setup code (otpauth://, one account) or an export code
+ * (otpauth-migration://, several). Each parser checks its own scheme and every account it
+ * returns has passed `checked`, so there is no path through here without the checks.
+ */
+export function parseSetupCode(input: string): ParsedOtp[] {
+  const uri = input.trim();
+  const parsers = new Map<string, (uri: string) => ParsedOtp[]>([
+    ['otpauth:', (u) => [parseOtpauth(u)]],
+    ['otpauth-migration:', parseMigration],
+  ]);
+  const parse = parsers.get(uri.slice(0, uri.indexOf(':') + 1).toLowerCase());
+  if (!parse) throw new HttpError(400, 'That is not an authenticator setup code');
+  return parse(uri).map(checked);
+}
+
 /** otpauth://totp/Issuer:account?secret=BASE32&issuer=Issuer&algorithm=SHA1&digits=6&period=30 (what a setup QR code contains) */
 export function parseOtpauth(input: string): ParsedOtp {
   let url: URL;
@@ -229,13 +245,7 @@ export async function addEntries(v: Viewer, body: { uris?: unknown; manual?: unk
   const parsed: ParsedOtp[] = [];
   if (Array.isArray(body?.uris)) {
     if (body.uris.length > 50) throw new HttpError(400, 'Too many codes at once');
-    for (const item of body.uris) {
-      const uri = String(item).trim();
-      const scheme = uri.slice(0, uri.indexOf(':') + 1).toLowerCase();
-      if (scheme === 'otpauth-migration:') parsed.push(...parseMigration(uri));
-      else if (scheme === 'otpauth:') parsed.push(parseOtpauth(uri));
-      else throw new HttpError(400, 'That is not an authenticator setup code');
-    }
+    for (const item of body.uris) parsed.push(...parseSetupCode(String(item)));
   }
   if (body?.manual && typeof body.manual === 'object') {
     const m = body.manual as Record<string, unknown>;
