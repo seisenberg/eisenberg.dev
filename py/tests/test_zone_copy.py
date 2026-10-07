@@ -92,7 +92,7 @@ def test_a_caa_record_that_shuts_amazon_out_is_copied_with_a_warning():
     zone = [rr("example.com.", "CAA", '0 issue "letsencrypt.org"'), rr("sub.example.com.", "CAA", '0 issue "amazon.com"')]
     changes, _, warnings = zone_copy.plan(zone, "example.com")
     assert names(changes) == [("example.com.", "CAA"), ("sub.example.com.", "CAA")]
-    assert len(warnings) == 1 and "example.com. CAA" in warnings[0] and 'issue \\"amazon.com\\"' in warnings[0]
+    assert len(warnings) == 1 and "example.com. CAA" in warnings[0] and 'issue "amazon.com"' in warnings[0]
 
 
 def test_records_tied_to_the_old_account_are_left_out():
