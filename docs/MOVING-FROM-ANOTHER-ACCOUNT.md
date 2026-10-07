@@ -125,6 +125,10 @@ Left out on purpose: the records the new stacks create themselves (the domain's 
   creates its own.
 - **`www`:** nothing to do. The new site answers on `www.` as well, with a redirect to the bare
   domain, and the application stack creates that record in step 6.
+- **A `CAA` record:** if the old zone has one that names only another certificate authority
+  (for example `0 issue "letsencrypt.org"`), the helper copies it and warns. Add the value
+  `0 issue "amazon.com"` to that record in the new zone before step 6, or the certificate never
+  issues. The old value can stay next to it.
 - **DNS at GoDaddy instead of Route 53:** export the zone file there (DNS, Actions, Export zone
   file), remove the lines for the domain's own `MX`, `_dmarc`, `mail` and (unless you want the
   old site kept) the `A` and `www` records, and import the rest in the Route 53 console (the new zone, Import

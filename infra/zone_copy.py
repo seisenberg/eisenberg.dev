@@ -72,6 +72,12 @@ def plan(record_sets, domain, mail_from="mail", with_site_address=False, old_zon
             skipped.append((original, reason))
             continue
 
+        if kind == "CAA":
+            allowed = " ".join(r.get("Value", "") for r in record.get("ResourceRecords", []))
+            if "amazon.com" not in allowed and "amazontrust.com" not in allowed:
+                warnings.append(f"{name} CAA: {allowed}. Amazon is not allowed to issue certificates for this name. "
+                                "Add the value 0 issue \"amazon.com\" to it (next to the others) before turning the "
+                                "certificate on in infra/domain.yml, or the certificate never issues")
         alias = record.get("AliasTarget")
         if alias:
             target = canonical(alias.get("DNSName", ""))
