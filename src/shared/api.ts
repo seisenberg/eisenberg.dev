@@ -257,6 +257,52 @@ export interface Contact {
   address: string;
 }
 
+// ---- people (the address book) ---------------------------------------------------------------
+
+export interface PersonSummary {
+  id: string;
+  name: string;
+  company: string;
+  /** out of the list and of autocomplete: a newsletter, a no-reply sender */
+  hidden: boolean;
+  /** made or edited by hand (otherwise it came from mail) */
+  manual: boolean;
+  addresses: string[];
+  lastSeen: string | null;
+  /** messages received from and sent to this person */
+  messages: number;
+}
+
+export interface PersonAddress {
+  address: string;
+  /** the display name the other side used last */
+  nameSeen: string;
+  firstSeen: string;
+  lastSeen: string | null;
+  received: number;
+  sent: number;
+}
+
+export interface PersonDetail {
+  id: string;
+  name: string;
+  company: string;
+  note: string;
+  hidden: boolean;
+  manual: boolean;
+  createdAt: string;
+  addresses: PersonAddress[];
+}
+
+export interface PersonInput {
+  name?: string;
+  company?: string;
+  note?: string;
+  hidden?: boolean;
+  /** the full list; an address of another person moves over (merge) */
+  addresses?: string[] | string;
+}
+
 export type FilterAction = 'archive' | 'read' | 'flag' | 'junk' | 'trash';
 
 export interface MailFilter {

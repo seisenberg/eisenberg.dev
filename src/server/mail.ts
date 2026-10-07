@@ -183,6 +183,8 @@ export interface ListParams {
   mailbox: MailboxView;
   domain?: string;
   address?: string;
+  /** all mail with one person of the viewer's address book (contact id) */
+  person?: string;
   q?: string;
   cursor?: string;
   limit?: number;
@@ -191,12 +193,23 @@ export interface ListParams {
 const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 /** The WHERE conditions for a mailbox view, shared by listing and "mark all as read". */
-function scopeConditions(v: Viewer, p: Pick<ListParams, 'mailbox' | 'domain' | 'address'>, params: unknown[]): string[] {
+function scopeConditions(v: Viewer, p: Pick<ListParams, 'mailbox' | 'domain' | 'address' | 'person'>, params: unknown[]): string[] {
   const where: string[] = [visible(v, params, 'm.domains')];
   const add = (sql: string, value: unknown) => {
     params.push(value);
     where.push(sql.replace('?', `$${params.length}`));
   };
+  if (p.person) {
+    // Everything exchanged with one person, across the mailboxes, except Junk and Trash. The
+    // addresses come from the viewer's own book, so nothing can be asked about that the viewer
+    // did not already see.
+    if (!/^[0-9]{1,18}$/.test(p.person)) throw new HttpError(400, 'Invalid person');
+    params.push(v.userId, p.person);
+    const book = `(select address from contact_addresses where user_id = $${params.length - 1} and contact_id = $${params.length})`;
+    where.push(`m.mailbox not in ('trash', 'junk')`);
+    where.push(`(lower(m.from_addr) = any (${book}) or exists (select 1 from jsonb_array_elements(m.to_list || m.cc_list) as t where m.direction = 'out' and lower(t ->> 'address') = any (${book})))`);
+    return where;
+  }
   if (p.mailbox === 'flagged') where.push(`m.is_flagged and m.mailbox not in ('trash', 'junk')`);
   else if (MAILBOXES.includes(p.mailbox)) add('m.mailbox = ?', p.mailbox);
   else throw new HttpError(400, 'Unknown mailbox');
@@ -536,9 +549,29 @@ export async function identities(v: Viewer): Promise<Identities> {
 export async function contacts(v: Viewer, qInput: unknown): Promise<Contact[]> {
   const q = String(qInput ?? '').trim().toLowerCase().slice(0, 100);
   if (q.length < 1) return [];
+  // Two sources, one ranking: people WRITTEN TO come first wherever they are known from, then
+  // the rest of the address book (with the names the viewer gave), then people who only wrote
+  // in. Someone hidden in the book is not suggested at all.
+  const { suggest, hiddenAddresses } = await import('./people.js');
+  const [book, mail, hidden] = await Promise.all([suggest(v, q, 8), fromMail(v, q), hiddenAddresses(v, q)]);
+  const merged = new Map<string, { name: string; address: string; score: number }>();
+  for (const c of book) merged.set(c.address, { name: c.name, address: c.address, score: (c.sent > 0 ? 2 : 0) + 1 });
+  for (const c of mail) {
+    const known = merged.get(c.address);
+    if (known) known.score = Math.max(known.score, (c.writtenTo ? 2 : 0) + 1);
+    else merged.set(c.address, { name: c.name, address: c.address, score: c.writtenTo ? 2 : 0 });
+  }
+  return [...merged.values()]
+    .filter((c) => !hidden.has(c.address))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8)
+    .map((c) => ({ name: c.name, address: c.address }));
+}
+
+async function fromMail(v: Viewer, q: string): Promise<(Contact & { writtenTo: boolean })[]> {
   const params: unknown[] = [`%${likeEscape(q)}%`, `${likeEscape(q)}%`];
   const scope = visible(v, params);
-  const res = await query<{ name: string | null; address: string }>(
+  const res = await query<{ name: string | null; address: string; written_to: boolean }>(
     `with people as (
        select lower(from_addr) as address, from_name as name, received_at, false as written_to
          from messages where direction = 'in' and mailbox not in ('junk', 'trash') and from_addr <> '' and ${scope}
@@ -546,7 +579,8 @@ export async function contacts(v: Viewer, qInput: unknown): Promise<Contact[]> {
        select lower(t ->> 'address'), t ->> 'name', received_at, true
          from messages, jsonb_array_elements(to_list || cc_list) as t where direction = 'out' and ${scope}
      )
-     select address, (array_agg(name order by written_to desc, received_at desc) filter (where name <> '' and name not like '%@%'))[1] as name
+     select address, (array_agg(name order by written_to desc, received_at desc) filter (where name <> '' and name not like '%@%'))[1] as name,
+            bool_or(written_to) as written_to
        from people
       where address like $1 or (lower(name) like $1 and name not like '%@%')
       group by address
@@ -554,5 +588,5 @@ export async function contacts(v: Viewer, qInput: unknown): Promise<Contact[]> {
       limit 8`,
     params,
   );
-  return res.rows.filter((r) => isAddress(r.address)).map((r) => ({ name: r.name ?? '', address: r.address }));
+  return res.rows.filter((r) => isAddress(r.address)).map((r) => ({ name: r.name ?? '', address: r.address, writtenTo: r.written_to }));
 }

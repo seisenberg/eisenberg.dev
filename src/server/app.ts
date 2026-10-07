@@ -7,6 +7,7 @@ import * as auth from './auth.js';
 import { query } from './db.js';
 import { ingestPending } from './ingest.js';
 import * as mail from './mail.js';
+import * as people from './people.js';
 import { HttpError } from './mail.js';
 import { schemaState } from './schema.js';
 import { sendMail } from './send.js';
@@ -235,6 +236,28 @@ export function createApp(options: AppOptions = {}): Koa {
   priv.get('/mail/identities', async (ctx) => {
     ctx.body = await mail.identities(viewer(ctx));
   });
+  // ---- people: the address book ----
+  priv.get('/people', async (ctx) => {
+    ctx.body = await people.listPeople(viewer(ctx), one(ctx.query.q));
+  });
+  priv.get('/people/by-address', async (ctx) => {
+    ctx.body = (await people.personByAddress(viewer(ctx), one(ctx.query.address))) ?? { id: null };
+  });
+  priv.get('/people/:id', async (ctx) => {
+    ctx.body = await people.getPerson(viewer(ctx), ctx.params.id);
+  });
+  priv.post('/people', async (ctx) => {
+    ctx.body = await people.createPerson(viewer(ctx), ctx.request.body as never);
+  });
+  priv.post('/people/update', async (ctx) => {
+    await people.updatePerson(viewer(ctx), ctx.request.body as never);
+    ctx.status = 204;
+  });
+  priv.post('/people/delete', async (ctx) => {
+    await people.deletePerson(viewer(ctx), ctx.request.body as never);
+    ctx.status = 204;
+  });
+
   priv.get('/mail/contacts', async (ctx) => {
     ctx.body = await mail.contacts(viewer(ctx), one(ctx.query.q));
   });
@@ -244,6 +267,7 @@ export function createApp(options: AppOptions = {}): Koa {
       mailbox: (one(q.mailbox) ?? 'inbox') as MailboxView,
       domain: one(q.domain),
       address: one(q.address),
+      person: one(q.person),
       q: one(q.q),
       cursor: one(q.cursor),
       limit: /^\d{1,3}$/.test(one(q.limit) ?? '') ? Number(one(q.limit)) : undefined,

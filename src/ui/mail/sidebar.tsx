@@ -5,7 +5,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import type { MailboxTree } from "../../shared/api";
 import type { Scope } from "./data";
 
-const sameScope = (a: Scope, b: Scope) => a.box === b.box && (a.domain ?? "") === (b.domain ?? "") && (a.address ?? "") === (b.address ?? "");
+const sameScope = (a: Scope, b: Scope) => a.box === b.box && (a.domain ?? "") === (b.domain ?? "") && (a.address ?? "") === (b.address ?? "") && (a.person ?? "") === (b.person ?? "");
 
 function Row({
   icon,

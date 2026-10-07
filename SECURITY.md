@@ -46,6 +46,10 @@ reporting for this repository (Security tab, "Report a vulnerability"), or write
   owner as authenticated data, so a row copied to another user does not decrypt. The API returns
   the current and next code and never the secret; there is no export. Database dumps and
   snapshots therefore do not contain usable secrets.
+- **The address book** is kept per sign-in and filled only from mail that sign-in can see, so a
+  member's book never names a person who wrote to another domain. Every query on it is keyed by
+  the sign-in's id. The "all mail with this person" view takes the person's addresses from the
+  viewer's own book, and is restricted like every other listing.
 - **Members** are separate sign-ins limited to chosen domains. The restriction is applied inside
   every mail query, not in the interface: a message the member may not see answers "not found"
   whether it is read, changed, downloaded or replied to. Members cannot use the file drop, manage

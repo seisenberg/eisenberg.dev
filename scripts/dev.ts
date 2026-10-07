@@ -22,6 +22,8 @@ if (await seed(local.pool)) {
   await seedState(local.pool);
   console.log('seeded mock mail');
 }
+// address books for sign-ins that have none yet (as src/server/main.ts does at start-up)
+await (await import('../src/server/people.js')).backfill();
 
 const { createServer } = await import('vite');
 const vite = await createServer({ appType: 'spa', server: { middlewareMode: true } });

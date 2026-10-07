@@ -297,6 +297,43 @@ test('sign-in code by email, then the offer to add a passkey, then a passkey sig
   assert.equal(await page.$('[role=region][aria-label="Add a passkey"]'), null, 'and the offer is not repeated');
 });
 
+test('people: the book, a person\'s mail, editing, and the sender link', async () => {
+  await page.goto(`${e2e.base}/mail`, { waitUntil: 'networkidle0' });
+  // the tabs: Mail, People, Files, Codes, with words at the default width
+  assert.deepEqual(await page.$$eval('aside a[href], [data-panel] a[href]', (as) => as.filter((a) => /^\/(mail|people|files|codes)$/.test(a.getAttribute('href') ?? '')).map((a) => a.textContent?.trim())), ['Mail', 'People', 'Files', 'Codes']);
+  await press(page, 'a[href="/people"]', 'People');
+  await page.waitForFunction(() => location.pathname === '/people' && document.body.innerText.includes('people'));
+  await press(page, '[role=option]', 'Jane Park');
+  await page.waitForFunction(() => document.body.innerText.includes('Correspondence'));
+  assert.match(await bodyText(page), /jane\.park@northwind\.example/);
+  // the person's mail opens in Mail, scoped to them, with a way back
+  await press(page, 'main li button', 'Standing desk');
+  await page.waitForFunction(() => location.pathname === '/mail' && location.search.includes('person='));
+  await page.waitForSelector('[role=option][aria-selected=true]');
+  assert.match(await page.$eval('[data-panel] + * + [data-panel], [data-panel]:nth-of-type(2)', (e) => e.textContent ?? ''), /Jane Park/);
+  await pressLabel(page, 'Back to People');
+  await page.waitForFunction(() => /^\/people\/[0-9]+$/.test(location.pathname));
+  // edit: a company and a note
+  await press(page, 'button', 'Edit');
+  await page.waitForSelector('#p-company');
+  await page.type('#p-company', 'Northwind');
+  await page.type('#p-note', 'Bought the standing desk');
+  await press(page, 'button', 'Save');
+  await page.waitForFunction(() => document.body.innerText.includes('Bought the standing desk') && document.body.innerText.includes('Northwind'));
+  // the sender's name in a message leads here
+  await page.goto(`${e2e.base}/mail`, { waitUntil: 'networkidle0' });
+  await press(page, '[role=option]', 'Standing desk');
+  await press(page, 'article header a, header a', 'Jane Park');
+  await page.waitForFunction(() => /^\/people\/[0-9]+$/.test(location.pathname) && document.body.innerText.includes('Correspondence'));
+  // a new person, by hand
+  await pressLabel(page, 'New person');
+  await page.waitForSelector('#p-name');
+  await page.type('#p-name', 'Ann Private');
+  await page.type('#p-addresses', 'ann@partners.example');
+  await press(page, 'button', 'Save');
+  await page.waitForFunction(() => document.body.innerText.includes('No mail with this person yet'));
+});
+
 test('file drop: upload, private by default, public link on demand', async () => {
   await page.goto(`${e2e.base}/files`, { waitUntil: 'networkidle0' });
   const file = path.join(tmp, 'Q3 report (draft).txt');

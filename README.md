@@ -151,6 +151,20 @@ Neither bucket is publicly readable; downloads are short-lived signed links. On 
 
 ![File drop](docs/screenshots/files.png)
 
+### People
+
+An address book that fills itself. Whoever writes to you, and whoever you write to, gets an entry
+with the name they used; you can rename it, add a company and a note, give it more addresses (an
+address taken from another entry merges the two), or hide it when it is a newsletter rather than a
+person. Open a person to see everything exchanged with them, across all mailboxes, and jump into
+any of it. The sender's name in a message leads to their entry, and recipients are suggested from
+the book first when you write. Each sign-in has a book of its own, so a member only ever sees
+people from their domains.
+
+| | |
+| --- | --- |
+| ![A person and the mail exchanged with them](docs/screenshots/address-book.png) | ![People on a phone](docs/screenshots/phone-address-book.png) |
+
 ### Codes: a built-in authenticator
 
 A small authenticator for the six digit codes other sites ask for. Add an account by taking a
@@ -269,8 +283,8 @@ migrates itself: the web function applies `db/schema.sql` at start-up when it ha
 | Path | What |
 | --- | --- |
 | `py/` | inbox lambda: `inbox.py` (handler), `relay.py` (message rewriting), `reconcile.py` (replay from S3), `push.py`, `db.py`, `config.py`, `tests/`, `pyproject.toml` and `uv.lock` (dependencies) |
-| `src/server/` | web lambda: `app.ts` (routes, headers), `auth.ts`, `passkeys.ts`, `users.ts`, `mail.ts`, `ingest.ts`, `send.ts`, `rules.ts`, `settings.ts`, `push.ts`, `files.ts`, `schema.ts`, `db.ts` |
-| `src/ui/` | `pages/` (portfolio, sign-in), `mail/`, `files/`, `settings/`, `components/ui/` (shadcn) |
+| `src/server/` | web lambda: `app.ts` (routes, headers), `auth.ts`, `passkeys.ts`, `users.ts`, `mail.ts`, `people.ts`, `ingest.ts`, `send.ts`, `rules.ts`, `settings.ts`, `push.ts`, `files.ts`, `schema.ts`, `db.ts` |
+| `src/ui/` | `pages/` (portfolio, sign-in), `mail/`, `people/`, `files/`, `codes/`, `settings/`, `components/ui/` (shadcn) |
 | `src/shared/api.ts` | types shared by server and UI |
 | `public/` | web app manifest, icons, `sw.js` |
 | `db/schema.sql` | the whole schema, idempotent |

@@ -49,6 +49,8 @@ export async function createMember(body: { username?: unknown; password?: unknow
     [username, passhash, domains],
   );
   if (!res.rowCount) throw new HttpError(409, 'That username is taken');
+  // the member's address book, from the mail they can see
+  await (await import('./people.js')).backfill();
 }
 
 async function memberId(input: unknown): Promise<number> {

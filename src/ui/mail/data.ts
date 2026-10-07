@@ -3,7 +3,7 @@ import { useLocation, useNavigate, useSearchParams } from "react-router";
 import { type InfiniteData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { get, patch, post } from "@/lib/api";
-import type { Draft, Identities, MailboxTree, MailboxView, MailSettings, MessageDetail, MessageList, MessagePatch, MessageSummary } from "../../shared/api";
+import type { Draft, Identities, MailboxTree, MailboxView, MailSettings, MessageDetail, MessageList, MessagePatch, MessageSummary, PersonDetail } from "../../shared/api";
 
 /** What the message list is showing. Lives in the URL so reload and back/forward work. */
 /** "drafts" is a client-side view: drafts are not messages. */
@@ -13,6 +13,8 @@ export interface Scope {
   box: Box;
   domain?: string;
   address?: string;
+  /** all mail with one person of the address book (contact id); the box is then ignored */
+  person?: string;
 }
 
 const BOXES: Box[] = ["inbox", "flagged", "sent", "drafts", "archive", "junk", "trash"];
@@ -24,9 +26,10 @@ export function useMailLocation() {
   const box = (BOXES.includes(params.get("box") as Box) ? params.get("box") : "inbox") as Box;
   const domain = params.get("domain") ?? undefined;
   const address = params.get("address") ?? undefined;
+  const person = params.get("person") ?? undefined;
   const id = params.get("id");
   const q = params.get("q") ?? "";
-  const scope = useMemo<Scope>(() => ({ box, domain, address }), [box, domain, address]);
+  const scope = useMemo<Scope>(() => ({ box, domain, address, person }), [box, domain, address, person]);
   /** This history entry was pushed by the app itself, so "back" returns to the previous screen. */
   const pushed = (location.state as { pushed?: boolean } | null)?.pushed === true;
 
@@ -36,8 +39,9 @@ export function useMailLocation() {
     q,
     /** phone layout: the mailbox list screen */
     boxes: params.get("boxes") === "1",
-    /** opened from the home screen "New Message" shortcut */
+    /** opened from the home screen "New Message" shortcut, or "Write" on a person */
     wantsCompose: params.get("compose") === "1",
+    composeTo: params.get("to") ?? "",
     pushed,
     back: () => navigate(-1),
     setScope(next: Scope) {
@@ -76,6 +80,7 @@ export function useMailLocation() {
         (prev) => {
           const p = new URLSearchParams(prev);
           p.delete("compose");
+          p.delete("to");
           return p;
         },
         { replace: true },
@@ -96,7 +101,8 @@ export function useMailLocation() {
   };
 }
 
-export function scopeTitle(scope: Scope): string {
+export function scopeTitle(scope: Scope, personName?: string): string {
+  if (scope.person) return personName ?? "";
   if (scope.address) return scope.address;
   if (scope.domain) return scope.domain;
   return { inbox: "All Inboxes", flagged: "Flagged", sent: "Sent", drafts: "Drafts", archive: "Archive", junk: "Junk", trash: "Trash" }[scope.box];
@@ -117,7 +123,8 @@ export function useMessages(scope: Scope, q: string) {
     initialPageParam: "",
     queryFn: ({ pageParam }) => {
       const p = new URLSearchParams({ mailbox: scope.box, limit: "60" });
-      if (scope.address) p.set("address", scope.address);
+      if (scope.person) p.set("person", scope.person);
+      else if (scope.address) p.set("address", scope.address);
       else if (scope.domain) p.set("domain", scope.domain);
       if (q) p.set("q", q);
       if (pageParam) p.set("cursor", pageParam);
@@ -229,4 +236,9 @@ export function useEmptyMailbox() {
       qc.invalidateQueries({ queryKey: ["messages"] });
     },
   });
+}
+
+/** One person of the address book (for the title of a person scope). */
+export function usePerson(id: string | undefined) {
+  return useQuery({ queryKey: ["person", id], queryFn: () => get<PersonDetail>(`/people/${id}`), enabled: !!id, staleTime: 60_000 });
 }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router";
 import { ChevronDown, Download, FileText, Loader2, Mail, Paperclip, ShieldAlert } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { avatarColor, fileSize, fullDate, initials, listDate } from "@/lib/format";
@@ -106,7 +107,11 @@ function MessageFull({ m, compact, showSubject }: { m: MessageDetail; compact: b
           <div className="min-w-0 flex-1 space-y-0.5">
             <div className="flex items-baseline gap-3">
               <span className="min-w-0 flex-1 truncate text-sm font-semibold max-md:text-[16px]" title={m.from.address}>
-                {sender}
+                {m.from.address && !ours.has(m.from.address) ? (
+                  <Link to={`/people?address=${encodeURIComponent(m.from.address)}`} className="hover:text-primary rounded-sm underline decoration-dotted decoration-muted-foreground/60 underline-offset-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/60" title={`${m.from.address}: open in People`}>{sender}</Link>
+                ) : (
+                  sender
+                )}
                 {m.from.name && !compact && <span className="text-muted-foreground ml-1.5 font-normal">{m.from.address}</span>}
               </span>
               <time className="text-muted-foreground shrink-0 text-xs max-md:text-[13px]" dateTime={m.date} title={fullDate(m.date)}>{compact ? listDate(m.date) : fullDate(m.date)}</time>

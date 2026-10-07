@@ -28,6 +28,10 @@ try {
   const state = await ensureSchema();
   setSchemaState(state);
   if (state === 'applied') console.log('database schema updated');
+  // address books for sign-ins that have none yet (first start after the feature, new members)
+  const { backfill } = await import('./people.js');
+  const books = await backfill();
+  if (books) console.log(`address book built for ${books} sign-in(s) from stored mail`);
 } catch (err) {
   setSchemaState('failed');
   console.error(`database not ready at start-up: ${(err as Error).message}`);

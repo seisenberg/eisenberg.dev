@@ -2,7 +2,7 @@ import { lazy, useEffect, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { startRegistration } from "@simplewebauthn/browser";
-import { BellRing, FolderOpen, KeyRound, Loader2, LogOut, Mail, Settings, ShieldCheck, User, X } from "lucide-react";
+import { BellRing, FolderOpen, KeyRound, Loader2, LogOut, Mail, Settings, ShieldCheck, User, Users, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -16,26 +16,29 @@ import MailPage from "../mail/mail-page";
 
 const FilesPage = lazy(() => import("../files/files-page"));
 const CodesPage = lazy(() => import("../codes/codes-page"));
+const PeoplePage = lazy(() => import("../people/people-page"));
 const SettingsDialog = lazy(() => import("../settings/settings-dialog"));
 const MailSettings = lazy(() => import("../settings/mail-settings"));
 
-type Section = "mail" | "files" | "codes";
+type Section = "mail" | "people" | "files" | "codes";
 
 function SectionSwitch({ section, files }: { section: Section; files: boolean }) {
   const tab = (to: string, key: Section, label: string, icon: React.ReactNode) => (
     <Link
       to={to}
       aria-current={section === key ? "page" : undefined}
-      className={cn("flex h-6 flex-1 items-center justify-center gap-1.5 rounded-[5px] text-xs font-medium max-md:h-9 max-md:rounded-lg max-md:text-[15px]", section === key ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground")}
+      className={cn("flex h-6 flex-auto items-center justify-center gap-1 rounded-[5px] px-0.5 text-[11px] font-medium whitespace-nowrap max-md:h-9 max-md:gap-1.5 max-md:rounded-lg max-md:px-1 max-md:text-[15px]", section === key ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground")}
     >
       {icon}
-      {label}
+      <span>{label}</span>
     </Link>
   );
   return (
-    <div className="flex h-[52px] shrink-0 items-center px-3 max-md:h-14">
-      <div className="bg-foreground/[0.07] flex w-full gap-0.5 rounded-md p-0.5 max-md:rounded-[10px]">
+    // @container: when the sidebar is narrowed, the tabs keep their icons and drop the words
+    <div className="@container flex h-[52px] shrink-0 items-center px-3 max-md:h-14">
+      <div className="bg-foreground/[0.07] flex w-full gap-0.5 rounded-md p-0.5 max-md:rounded-[10px] [&_a>svg]:shrink-0 @max-[216px]:[&_a>span]:hidden">
         {tab("/mail", "mail", "Mail", <Mail className="size-3.5" />)}
+        {tab("/people", "people", "People", <Users className="size-3.5" />)}
         {files && tab("/files", "files", "Files", <FolderOpen className="size-3.5" />)}
         {tab("/codes", "codes", "Codes", <ShieldCheck className="size-3.5" />)}
       </div>
@@ -91,6 +94,7 @@ function MobileTabs({ section, files, account }: { section: Section; files: bool
     <nav aria-label="Sections" className="bg-background pb-safe shrink-0 border-t">
       <div className="flex">
         {tab("/mail", "mail", "Mail", <Mail className="size-[22px]" />)}
+        {tab("/people", "people", "People", <Users className="size-[22px]" />)}
         {files && tab("/files", "files", "Files", <FolderOpen className="size-[22px]" />)}
         {tab("/codes", "codes", "Codes", <ShieldCheck className="size-[22px]" />)}
         <AccountMenu {...account} asTab />
@@ -220,7 +224,7 @@ export default function PrivateArea({ section }: { section: Section }) {
   return (
     <TooltipProvider delayDuration={500}>
       <div className="h-app overflow-hidden">
-        {section === "mail" ? <MailPage header={header} footer={footer} tabs={tabs} /> : section === "files" ? <FilesPage header={header} footer={footer} tabs={tabs} /> : <CodesPage header={header} footer={footer} tabs={tabs} />}
+        {section === "mail" ? <MailPage header={header} footer={footer} tabs={tabs} /> : section === "people" ? <PeoplePage header={header} footer={footer} tabs={tabs} /> : section === "files" ? <FilesPage header={header} footer={footer} tabs={tabs} /> : <CodesPage header={header} footer={footer} tabs={tabs} />}
       </div>
       {settings && <SettingsDialog user={session.data} onClose={() => setSettings(false)} />}
       {mailSettings && <MailSettings user={session.data} onClose={() => setMailSettings(false)} />}

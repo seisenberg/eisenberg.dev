@@ -918,6 +918,88 @@ test('passkeys: options are single-use challenges; registration needs the passwo
   assert.deepEqual((await call('GET', '/api/auth/passkeys')).json, []);
 });
 
+test('people: built from mail, edited and merged by hand, searched, and kept apart per sign-in', async () => {
+  type Summary = { id: string; name: string; company: string; hidden: boolean; manual: boolean; addresses: string[]; messages: number; lastSeen: string | null };
+  const list = async (q = '', opts = {}) => (await call('GET', `/api/people${q ? `?q=${encodeURIComponent(q)}` : ''}`, undefined, opts)).json as Summary[];
+  const byName = (people: Summary[], name: string) => people.find((p) => p.name === name)!;
+
+  // every sender of stored mail is in the owner's book; none of our own or relay addresses are
+  const people = await list();
+  const jane = byName(people, 'Jane Park');
+  assert.ok(jane && jane.addresses.includes('jane.park@northwind.example') && !jane.manual && jane.messages >= 1 && jane.lastSeen);
+  assert.ok(people.every((p) => p.addresses.every((a) => !/@(eisenberg\.dev|harborlight\.example|quartzworks\.example)$/.test(a) && !/^reply-[0-9a-f]{32}@/.test(a))));
+  assert.deepEqual(people.map((p) => (p.name || p.company || p.addresses[0]).toLowerCase()), [...people.map((p) => (p.name || p.company || p.addresses[0]).toLowerCase())].sort(), 'sorted by name');
+  // search matches names, companies and addresses
+  assert.deepEqual((await list('northwind')).map((p) => p.name).sort(), ['Jane Park', 'Northwind Outfitters']);
+  assert.equal((await list('zzz-nobody')).length, 0);
+
+  // a person made by hand, taking over an address that mail had already made an entry for (a merge)
+  const made = await call('POST', '/api/people', { name: 'Jane Park', company: 'Northwind', note: 'Bought the standing desk', addresses: 'Jane.Park@northwind.example, jp@home.example' });
+  assert.equal(made.status, 200, made.text);
+  const id = made.json.id as string;
+  const after = await list();
+  assert.equal(after.filter((p) => p.name === 'Jane Park').length, 1, 'the automatic entry was merged into the new one');
+  const detail = (await call('GET', `/api/people/${id}`)).json;
+  assert.deepEqual([detail.name, detail.company, detail.note, detail.manual, detail.hidden], ['Jane Park', 'Northwind', 'Bought the standing desk', true, false]);
+  assert.deepEqual(detail.addresses.map((a: Json) => a.address).sort(), ['jane.park@northwind.example', 'jp@home.example']);
+  assert.ok(detail.addresses.find((a: Json) => a.address === 'jane.park@northwind.example').received >= 1, 'the counts came along');
+
+  // what is refused
+  for (const bad of [{ name: 'X', addresses: ['me@eisenberg.dev'] }, { name: 'X', addresses: ['not-an-address'] }, { name: 'X', addresses: ['reply-0123456789abcdef0123456789abcdef@other.example'] }, { addresses: [] }, { name: 'X', addresses: Array.from({ length: 21 }, (_, i) => `a${i}@x.example`) }]) {
+    assert.equal((await call('POST', '/api/people', bad)).status, 400, JSON.stringify(bad));
+  }
+  assert.equal((await call('GET', '/api/people/999999')).status, 404);
+  assert.equal((await call('GET', '/api/people/abc')).status, 400);
+
+  // all mail with the person, newest first, and mail sent to them joins it
+  const before = (await call('GET', `/api/mail/messages?person=${id}`)).json as MessageList;
+  assert.ok(before.messages.length >= 1);
+  assert.ok(before.messages.every((m) => (m.direction === 'in' && m.from.address === 'jane.park@northwind.example') || (m.direction === 'out' && m.to.some((t) => t.address === 'jane.park@northwind.example'))), 'only mail from or to Jane');
+  const first = (await call('GET', `/api/mail/messages/${before.messages.find((m) => m.direction === 'in')!.id}`)).json as MessageDetail;
+  assert.equal((await call('POST', '/api/mail/send', { from: first.replyFrom, to: ['jp@home.example'], subject: 'Pickup', text: 'Saturday works.' })).status, 200);
+  const withSent = (await call('GET', `/api/mail/messages?person=${id}`)).json as MessageList;
+  assert.equal(withSent.messages.length, before.messages.length + 1);
+  assert.equal(withSent.messages[0].direction, 'out');
+  const sentCount = ((await call('GET', `/api/people/${id}`)).json.addresses as Json[]).find((a) => a.address === 'jp@home.example').sent;
+  assert.equal(sentCount, 1);
+  assert.equal((await call('GET', '/api/mail/messages?person=999999')).json.messages.length, 0);
+
+  // the book comes first in recipient autocomplete, with the name you gave
+  await call('POST', '/api/people/update', { id, name: 'Jane Park (desk)' });
+  const suggested = (await call('GET', '/api/mail/contacts?q=jane')).json as { name: string; address: string }[];
+  assert.equal(suggested[0].name, 'Jane Park (desk)');
+  assert.ok(suggested.some((c) => c.address === 'jp@home.example'));
+  // hidden: out of the suggestions and marked in the list; shown again on request
+  assert.equal((await call('POST', '/api/people/update', { id, hidden: true })).status, 204);
+  assert.ok(!((await call('GET', '/api/mail/contacts?q=jane')).json as Json[]).some((c) => c.address === 'jp@home.example'));
+  assert.equal((await list()).find((p) => p.id === id)!.hidden, true);
+  await call('POST', '/api/people/update', { id, hidden: false });
+  // taking an address away forgets it; the automatic entry is not recreated for old mail
+  await call('POST', '/api/people/update', { id, addresses: ['jp@home.example'] });
+  assert.deepEqual(((await call('GET', `/api/people/${id}`)).json.addresses as Json[]).map((a) => a.address), ['jp@home.example']);
+
+  // a member has a book of their own, built from the mail of their domains only
+  await call('POST', '/api/users', { username: 'quinn', password: 'a-long-enough-password', domains: ['harborlight.example'] });
+  const quinnLogin = await call('POST', '/api/auth/login', { username: 'quinn', password: 'a-long-enough-password' }, { noCookie: true, headers: { 'x-forwarded-for': '198.51.100.240' } });
+  const asQuinn = () => ({ noCookie: true, headers: { cookie: quinnLogin.headers.getSetCookie().find((c) => c.startsWith('eisenmail_dev='))!.split(';')[0] } });
+  const mine = await list('', asQuinn());
+  assert.ok(mine.length > 0 && mine.length < people.length);
+  assert.ok(!mine.some((p) => p.addresses.includes('jane.park@northwind.example')), 'Jane wrote to another domain');
+  assert.equal((await call('GET', `/api/people/${id}`, undefined, asQuinn())).status, 404);
+  assert.equal((await call('POST', '/api/people/update', { id, name: 'x' }, asQuinn())).status, 404);
+  assert.equal(((await call('GET', `/api/mail/messages?person=${id}`, undefined, asQuinn())).json as MessageList).messages.length, 0);
+  assert.equal((await call('POST', '/api/people/delete', { id }, asQuinn())).status, 404);
+
+  // the sender's name links to the person; an unknown address is answered with no id
+  assert.equal((await call('GET', '/api/people/by-address?address=JP@Home.example')).json.id, id);
+  assert.equal((await call('GET', '/api/people/by-address?address=nobody@nowhere.example')).json.id, null);
+
+  assert.equal((await call('POST', '/api/people/delete', { id })).status, 204);
+  assert.equal((await call('GET', `/api/people/${id}`)).status, 404);
+  const quinn = ((await call('GET', '/api/users')).json as Json[]).find((u) => u.username === 'quinn');
+  await call('POST', '/api/users/delete', { id: quinn.id });
+});
+
 test('review fixes: what a member can infer, and what a password change invalidates', async () => {
   const keys = { p256dh: 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM', auth: 'tBHItJI5svbpez7KI4CCXg' };
   // usernames are unique without regard to case

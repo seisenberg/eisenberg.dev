@@ -90,6 +90,24 @@ test('mailboxes screen and swipe to delete', async () => {
   await page.waitForFunction((n) => document.querySelectorAll('[role=option]').length === n - 1, {}, before);
 });
 
+test('people on a phone: list, person, back', async () => {
+  await page.goto(`${e2e.base}/mail`, { waitUntil: 'networkidle0' });
+  await page.waitForSelector('nav[aria-label=Sections]');
+  assert.deepEqual(await page.$$eval('nav[aria-label=Sections] a', (as) => as.map((a) => a.textContent?.trim())), ['Mail', 'People', 'Files', 'Codes']);
+  await press(page, 'nav[aria-label=Sections] a', 'People', tap);
+  await page.waitForFunction(() => location.pathname === '/people' && !!document.querySelector('input[aria-label="Search people"]'));
+  assert.equal(await overflowsSideways(), false);
+  await press(page, '[role=option]', 'Priya Raman', tap);
+  await page.waitForFunction(() => /^\/people\/[0-9]+$/.test(location.pathname) && document.body.innerText.includes('Correspondence'));
+  assert.equal(await overflowsSideways(), false);
+  await press(page, 'main li button, li button', 'Fractional CTO', tap);
+  await page.waitForFunction(() => location.pathname === '/mail' && location.search.includes('person='));
+  await page.goBack();
+  await page.waitForFunction(() => /^\/people\/[0-9]+$/.test(location.pathname));
+  await press(page, 'button', 'People', tap);
+  await page.waitForFunction(() => location.pathname === '/people');
+});
+
 test('the tab bar reaches Files and Codes in one tap; Files can take a photo', async () => {
   await page.goto(`${e2e.base}/mail`, { waitUntil: 'networkidle0' });
   await page.waitForSelector('nav[aria-label=Sections]');

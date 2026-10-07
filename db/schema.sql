@@ -348,3 +348,38 @@ create index if not exists login_challenges_user on login_challenges (user_id, c
 
 -- how a session was started: a fresh password sign-in may add a passkey without retyping the password
 alter table webmail_sessions add column if not exists method text not null default 'password';
+
+-- ---------------------------------------------------------------------------------------------
+-- People: an address book per sign-in. Rows appear by themselves when mail arrives or is sent
+-- (src/server/people.ts) and can be made and edited by hand. A member's book is built only from
+-- mail that member can see.
+-- ---------------------------------------------------------------------------------------------
+create table if not exists contacts (
+    id          bigint generated always as identity primary key,
+    user_id     int not null references webmail_users (id) on delete cascade,
+    name        text not null default '',
+    company     text not null default '',
+    note        text not null default '',
+    source      text not null default 'mail' check (source in ('mail', 'manual')),
+    hidden      boolean not null default false,   -- "not a person": out of the list and of autocomplete
+    created_at  timestamptz not null default now(),
+    updated_at  timestamptz not null default now()
+);
+create index if not exists contacts_user on contacts (user_id, hidden, name);
+
+-- An address belongs to exactly one contact per book; a contact can have several.
+create table if not exists contact_addresses (
+    user_id     int not null references webmail_users (id) on delete cascade,
+    address     text not null,                         -- lowercased
+    contact_id  bigint not null references contacts (id) on delete cascade,
+    name_seen   text not null default '',              -- the display name the other side used last
+    first_seen  timestamptz not null default now(),
+    last_seen   timestamptz,
+    received    int not null default 0,                -- messages from this address
+    sent        int not null default 0,                -- messages written to it
+    primary key (user_id, address)
+);
+create index if not exists contact_addresses_contact on contact_addresses (contact_id);
+
+-- "all mail with this person"
+create index if not exists messages_from_addr_lower on messages (lower(from_addr));

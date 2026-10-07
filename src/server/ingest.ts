@@ -1,6 +1,7 @@
 import { simpleParser, type AddressObject, type ParsedMail } from 'mailparser';
 import config from './config.js';
 import { tx, type Queryable } from './db.js';
+import { recordFromMessage } from './people.js';
 import type { Person } from '../shared/api.js';
 
 // Turns raw rows in lambda_inbox (written by the python SES lambda, or by send.ts) into rows of the
@@ -213,6 +214,15 @@ export async function indexRow(db: Queryable, row: RawRow, filters: FilterRow[] 
       JSON.stringify(outbound ? null : verdicts(row)),
     ],
   );
+  await recordFromMessage(db, {
+    direction: outbound ? 'out' : 'in',
+    mailbox: outbound ? 'sent' : row.kind === 'junk' ? 'junk' : 'inbox',
+    domains: uniq(addresses.map(domainOf)),
+    from: { name: clean(from.name, 300), address: clean(from.address, 320) },
+    to: cleanPeople(people(mail?.to)),
+    cc: cleanPeople(people(mail?.cc)),
+    at: Number.isNaN(received.getTime()) ? row.created_at : received,
+  });
 
   // Conversation: join the thread of the message this one answers, else start a new one.
   await db.query(

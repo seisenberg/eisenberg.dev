@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { Archive, ArchiveRestore, CheckCheck, ChevronLeft, Ellipsis, Flag, Forward, Inbox, MailOpen, Reply, ReplyAll, Search, ShieldAlert, SquarePen, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,7 +11,7 @@ import { cn } from "@/lib/utils";
 import { get } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { Compose, draftFor, type Draft } from "./compose";
-import { scopeTitle, useDeleteForever, useDrafts, useEmptyMailbox, useIdentities, useMailboxes, useMailLocation, useMailSettings, useMarkAllRead, useMessage, useMessages, usePatchMessages } from "./data";
+import { scopeTitle, useDeleteForever, useDrafts, useEmptyMailbox, useIdentities, useMailboxes, useMailLocation, useMailSettings, useMarkAllRead, useMessage, useMessages, usePatchMessages, usePerson } from "./data";
 import { DraftsList } from "./drafts-list";
 import { InstallHint } from "./install-hint";
 import { MessageList, type RowAction } from "./message-list";
@@ -52,6 +53,7 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
   const mobile = useIsMobile();
   const qc = useQueryClient();
   const loc = useMailLocation();
+  const navigate = useNavigate();
   const { scope, id, q } = loc;
   const tree = useMailboxes();
   const identities = useIdentities();
@@ -63,6 +65,8 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
   const drafts = useDrafts();
   const settings = useMailSettings();
   const isDrafts = scope.box === "drafts";
+  const person = usePerson(scope.person);
+  const title = scopeTitle(scope, person.data?.name || person.data?.company || person.data?.addresses[0]?.address || "…");
 
   const messages = useMemo(() => list.data?.pages.flatMap((p) => p.messages) ?? [], [list.data]);
   const [selected, setSelected] = useState<Set<string>>(() => new Set(id ? [id] : []));
@@ -249,8 +253,11 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
   // Home screen shortcut "New Message".
   useEffect(() => {
     if (!loc.wantsCompose || !identities.data) return;
+    const to = loc.composeTo;
     loc.clearCompose();
-    void compose("new");
+    void compose("new").then(() => {
+      if (to) setDraft((d) => (d && d.mode === "new" ? { ...d, to } : d));
+    });
   }, [loc.wantsCompose, identities.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const total = list.data ? messages.length : 0;
@@ -263,7 +270,7 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
   const countLine = isDrafts
     ? `${drafts.data?.length ?? 0} draft${drafts.data?.length === 1 ? "" : "s"}`
     : (q ? `${total}${list.hasNextPage ? "+" : ""} found` : `${total}${list.hasNextPage ? "+" : ""} message${total === 1 ? "" : "s"}`) +
-      (scope.box === "inbox" && tree.data && !q && !scope.address && !scope.domain && tree.data.inbox.unread > 0 ? `, ${tree.data.inbox.unread} unread` : "") +
+      (scope.box === "inbox" && tree.data && !q && !scope.address && !scope.domain && !scope.person && tree.data.inbox.unread > 0 ? `, ${tree.data.inbox.unread} unread` : "") +
       (inTrash && retention > 0 ? `, deleted after ${retention} days` : "");
   /** Actions on the whole mailbox view. */
   const listMenu = !isDrafts && (
@@ -288,7 +295,7 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
         ref={searchRef}
         type="search"
         enterKeyHint="search"
-        aria-label={`Search ${scopeTitle(scope)}`}
+        aria-label={`Search ${title}`}
         placeholder="Search"
         value={searchText}
         onChange={(e) => setSearchText(e.target.value)}
@@ -338,13 +345,17 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
           <>
             <header className="pt-safe shrink-0 border-b">
               <div className="flex h-12 items-center gap-1 px-1">
-                <TouchButton label="Mailboxes" onClick={loc.openBoxes} className="pr-3 pl-1"><ChevronLeft /> <span>Mailboxes</span></TouchButton>
+                {scope.person ? (
+                  <TouchButton label="Back to People" onClick={() => navigate(`/people/${scope.person}`)} className="pr-3 pl-1"><ChevronLeft /> <span>People</span></TouchButton>
+                ) : (
+                  <TouchButton label="Mailboxes" onClick={loc.openBoxes} className="pr-3 pl-1"><ChevronLeft /> <span>Mailboxes</span></TouchButton>
+                )}
                 <div className="flex-1" />
                 {listMenu}
                 <TouchButton label="New Message" onClick={() => void compose("new")}><SquarePen /></TouchButton>
               </div>
               <div className="px-4 pb-2">
-                <h1 className="truncate text-[28px] leading-tight font-bold tracking-tight" title={scopeTitle(scope)}>{scopeTitle(scope)}</h1>
+                <h1 className="truncate text-[28px] leading-tight font-bold tracking-tight" title={title}>{title}</h1>
                 <div className="text-muted-foreground text-[13px]">{countLine}</div>
               </div>
               {!isDrafts && <div className="px-4 pb-2.5">{searchField}</div>}
@@ -359,8 +370,8 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
           <>
             <header className="pt-safe shrink-0 border-b">
               <div className="flex h-12 items-center gap-1 px-1">
-                <TouchButton label={`Back to ${scopeTitle(scope)}`} onClick={closeReader} className="max-w-[60%] pr-3 pl-1">
-                  <ChevronLeft className="shrink-0" /> <span className="truncate">{scopeTitle(scope)}</span>
+                <TouchButton label={`Back to ${title}`} onClick={closeReader} className="max-w-[60%] pr-3 pl-1">
+                  <ChevronLeft className="shrink-0" /> <span className="truncate">{title}</span>
                 </TouchButton>
                 <div className="flex-1" />
                 <TouchButton label={current && !current.isRead ? "Mark as Read" : "Mark as Unread"} disabled={!current} onClick={() => { act("toggleRead"); closeReader(); }}><MailOpen /></TouchButton>
@@ -404,7 +415,7 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
   return (
     <div className="flex h-full flex-col">
       <Group orientation="horizontal" id="eisenmail-panes" className="min-h-0 flex-1">
-        <Panel id="sidebar" defaultSize="240px" minSize="190px" maxSize="380px" className="bg-sidebar flex flex-col border-r">
+        <Panel id="sidebar" defaultSize="256px" minSize="190px" maxSize="380px" className="bg-sidebar flex flex-col border-r">
           {header}
           <Sidebar tree={tree.data} scope={scope} onSelect={loc.setScope} onEmpty={emptyAll} drafts={drafts.data?.length} />
           {footer}
@@ -413,8 +424,9 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
 
         <Panel id="list" defaultSize="380px" minSize="280px" maxSize="560px" className="flex flex-col border-r">
           <div className="flex h-[52px] shrink-0 items-center gap-2 border-b px-4">
+            {scope.person && <ToolButton label="Back to People" onClick={() => navigate(`/people/${scope.person}`)}><ChevronLeft /></ToolButton>}
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-bold" title={scopeTitle(scope)}>{scopeTitle(scope)}</div>
+              <div className="truncate text-[13px] font-bold" title={title}>{title}</div>
               <div className="text-muted-foreground truncate text-[11px]">{countLine}</div>
             </div>
             {listMenu}

@@ -205,7 +205,7 @@ export default function FilesPage({ header, footer, tabs }: { header: React.Reac
 
   return (
     <div className="flex h-full">
-      <aside className="bg-sidebar flex w-60 shrink-0 flex-col border-r">
+      <aside className="bg-sidebar flex w-64 shrink-0 flex-col border-r">
         {header}
         <nav aria-label="File filters" className="flex-1 px-2">
           <div className="text-muted-foreground px-2 pt-4 pb-1 text-[11px] font-semibold">File Drop</div>

@@ -252,7 +252,7 @@ export default function CodesPage({ header, footer, tabs }: { header: React.Reac
   }
   return (
     <div className="flex h-full">
-      <aside className="bg-sidebar flex w-60 shrink-0 flex-col border-r">
+      <aside className="bg-sidebar flex w-64 shrink-0 flex-col border-r">
         {header}
         <div className="text-muted-foreground flex-1 px-4 pt-4 text-xs leading-relaxed">
           One-time codes for your other accounts. The keys are kept encrypted on the server and never sent to the browser.
