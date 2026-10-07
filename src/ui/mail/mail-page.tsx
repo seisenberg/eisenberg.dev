@@ -333,8 +333,8 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
       <div className="bg-background h-app flex flex-col">
         {screen === "boxes" && (
           <>
-            <div className="bg-sidebar pt-safe flex min-h-0 flex-1 flex-col">
-              <h1 className="px-4 pt-4 pb-1 text-[28px] leading-tight font-bold tracking-tight">Mailboxes</h1>
+            <div className="bg-sidebar flex min-h-0 flex-1 flex-col">
+              <header className="top-bar bg-sidebar pt-safe shrink-0"><h1 className="px-4 pt-4 pb-1 text-[28px] leading-tight font-bold tracking-tight">Mailboxes</h1></header>
               <Sidebar mobile tree={tree.data} scope={scope} onSelect={loc.setScope} onEmpty={emptyAll} drafts={drafts.data?.length} />
             </div>
             {tabs}
@@ -343,7 +343,7 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
 
         {screen === "list" && (
           <>
-            <header className="pt-safe shrink-0 border-b">
+            <header className="top-bar pt-safe shrink-0 border-b">
               <div className="flex h-12 items-center gap-1 px-1">
                 {scope.person ? (
                   <TouchButton label="Back to People" onClick={() => navigate(`/people/${scope.person}`)} className="pr-3 pl-1"><ChevronLeft /> <span>People</span></TouchButton>
@@ -368,7 +368,7 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
 
         {screen === "reader" && (
           <>
-            <header className="pt-safe shrink-0 border-b">
+            <header className="top-bar pt-safe shrink-0 border-b">
               <div className="flex h-12 items-center gap-1 px-1">
                 <TouchButton label={`Back to ${title}`} onClick={closeReader} className="max-w-[60%] pr-3 pl-1">
                   <ChevronLeft className="shrink-0" /> <span className="truncate">{title}</span>

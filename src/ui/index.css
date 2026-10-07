@@ -129,6 +129,19 @@ html {
 .h-app {
   height: 100dvh;
 }
+/*
+ * The top element of each phone screen. iOS (26 and later) blurs the status bar area unless a
+ * fixed or sticky box with an opaque background covers the top edge; then it paints the bar in
+ * that box's colour instead. So every top bar is sticky and carries its background explicitly.
+ */
+@layer components {
+  .top-bar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background-color: var(--background); /* a utility such as bg-sidebar on the same element wins */
+  }
+}
 .pt-safe {
   padding-top: env(safe-area-inset-top);
 }

@@ -71,7 +71,10 @@ export default function Login() {
   }
 
   return (
-    <div className="bg-muted/40 flex min-h-full items-center justify-center p-6 text-sm">
+    <div className="bg-muted/40 flex min-h-full flex-col text-sm">
+      {/* the status bar strip on a phone, in the page's own colour (see .top-bar in index.css) */}
+      <div className="top-bar pt-safe md:hidden" style={{ backgroundColor: "color-mix(in srgb, var(--muted) 40%, var(--background))" }} />
+      <div className="flex flex-1 items-center justify-center p-6">
       <div className="w-full max-w-sm">
         <div className="bg-card rounded-2xl border p-8 shadow-sm">
           <div className="bg-primary/10 text-primary mb-5 flex size-11 items-center justify-center rounded-xl">
@@ -126,6 +129,7 @@ export default function Login() {
         <p className="text-muted-foreground mt-6 text-center">
           <Link to="/" className="hover:text-foreground">Back to eisenberg.dev</Link>
         </p>
+      </div>
       </div>
     </div>
   );

@@ -155,7 +155,7 @@ export default function FilesPage({ header, footer, tabs }: { header: React.Reac
     );
     return (
       <div className="bg-background h-app flex flex-col text-[15px]">
-        <header className="pt-safe shrink-0 border-b px-4 pb-2">
+        <header className="top-bar pt-safe shrink-0 border-b px-4 pb-2">
           <div className="flex items-end gap-2 pt-3">
             <h1 className="flex-1 text-[28px] leading-tight font-bold tracking-tight">Files</h1>
             <Button size="sm" variant="outline" className="h-9" aria-label="Take a photo" onClick={() => camera.current?.click()} disabled={listing.data?.enabled === false}><Camera /> Photo</Button>

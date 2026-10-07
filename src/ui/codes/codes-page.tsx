@@ -207,7 +207,7 @@ export default function CodesPage({ header, footer, tabs }: { header: React.Reac
 
   const main = (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className={cn("flex shrink-0 items-center gap-3 border-b", mobile ? "pt-safe px-4 pb-2" : "h-[52px] px-5")}>
+      <div className={cn("flex shrink-0 items-center gap-3 border-b", mobile ? "top-bar pt-safe px-4 pb-2" : "h-[52px] px-5")}>
         <div className={cn("min-w-0 flex-1", mobile && "pt-3")}>
           <h1 className={cn("font-bold", mobile ? "text-[28px] leading-tight tracking-tight" : "text-[13px]")}>Codes</h1>
           <div className="text-muted-foreground text-[11px] max-md:text-[13px]">{total} account{total === 1 ? "" : "s"}. Tap a code to copy it.</div>

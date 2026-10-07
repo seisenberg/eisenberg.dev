@@ -203,13 +203,15 @@ function Detail({ id, mobile, onBack }: { id: string; mobile: boolean; onBack: (
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {mobile && (
-        <div className="pt-safe flex h-12 shrink-0 items-center gap-1 px-1">
-          <button type="button" onClick={onBack} className="text-primary flex h-11 items-center gap-0.5 rounded-lg pr-3 pl-1 text-[17px] active:bg-accent"><ChevronLeft /> People</button>
-          <div className="flex-1" />
-          {!editing && <button type="button" aria-label="Edit" onClick={() => setEditing(true)} className="text-primary flex h-11 min-w-11 items-center justify-center rounded-lg active:bg-accent [&_svg]:size-[22px]"><Pencil /></button>}
-          {!editing && <button type="button" aria-label="Write" onClick={write} disabled={addresses.length === 0} className="text-primary flex h-11 min-w-11 items-center justify-center rounded-lg active:bg-accent disabled:opacity-40 [&_svg]:size-[22px]"><SquarePen /></button>}
-          {!editing && menu}
-        </div>
+        <header className="top-bar pt-safe shrink-0">
+          <div className="flex h-12 items-center gap-1 px-1">
+            <button type="button" onClick={onBack} className="text-primary flex h-11 items-center gap-0.5 rounded-lg pr-3 pl-1 text-[17px] active:bg-accent"><ChevronLeft /> People</button>
+            <div className="flex-1" />
+            {!editing && <button type="button" aria-label="Edit" onClick={() => setEditing(true)} className="text-primary flex h-11 min-w-11 items-center justify-center rounded-lg active:bg-accent [&_svg]:size-[22px]"><Pencil /></button>}
+            {!editing && <button type="button" aria-label="Write" onClick={write} disabled={addresses.length === 0} className="text-primary flex h-11 min-w-11 items-center justify-center rounded-lg active:bg-accent disabled:opacity-40 [&_svg]:size-[22px]"><SquarePen /></button>}
+            {!editing && menu}
+          </div>
+        </header>
       )}
       <div className="min-h-0 flex-1 overflow-auto">
         {editing ? (
@@ -318,7 +320,7 @@ export default function PeoplePage({ header, footer, tabs }: { header: React.Rea
   const newForm = adding && (
     <div className="flex min-h-0 flex-1 flex-col">
       {mobile ? (
-        <div className="pt-safe flex h-12 shrink-0 items-center px-1"><button type="button" onClick={() => setAdding(null)} className="text-primary flex h-11 items-center gap-0.5 rounded-lg pr-3 pl-1 text-[17px] active:bg-accent"><ChevronLeft /> People</button></div>
+        <header className="top-bar pt-safe shrink-0"><div className="flex h-12 items-center px-1"><button type="button" onClick={() => setAdding(null)} className="text-primary flex h-11 items-center gap-0.5 rounded-lg pr-3 pl-1 text-[17px] active:bg-accent"><ChevronLeft /> People</button></div></header>
       ) : (
         <div className="flex h-[52px] shrink-0 items-center border-b px-6 text-[13px] font-bold">New person</div>
       )}
@@ -331,10 +333,10 @@ export default function PeoplePage({ header, footer, tabs }: { header: React.Rea
     if (selected) return <div className="bg-background h-app flex flex-col text-[15px]"><Detail id={selected} mobile onBack={back} /></div>;
     return (
       <div className="bg-background h-app flex flex-col text-[15px]">
-        <div className="pt-safe flex shrink-0 items-center justify-between px-4 pt-3">
+        <header className="top-bar pt-safe shrink-0"><div className="flex items-center justify-between px-4 pt-3">
           <h1 className="text-[28px] leading-tight font-bold tracking-tight">People</h1>
           <Button size="sm" className="h-9" onClick={() => setAdding({})}><Plus /> New</Button>
-        </div>
+        </div></header>
         <div className="px-4 pt-2 pb-2">{search}</div>
         {list}
         {tabs}
