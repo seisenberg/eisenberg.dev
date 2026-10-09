@@ -9,7 +9,7 @@ import { ingestPending } from './ingest.js';
 import * as mail from './mail.js';
 import * as people from './people.js';
 import { HttpError } from './mail.js';
-import { schemaState } from './schema.js';
+import { schemaState, whenStarted } from './schema.js';
 import { sendMail } from './send.js';
 import * as rules from './rules.js';
 import * as push from './push.js';
@@ -122,6 +122,15 @@ export function createApp(options: AppOptions = {}): Koa {
     ctx.set('Location', `${site.origin}${ctx.path.startsWith('/') ? ctx.path : '/'}${ctx.search}`);
     ctx.set('Cache-Control', 'public, max-age=86400');
     ctx.body = '';
+  });
+
+  // ---- start-up: API requests wait for the database preparation (schema.ts, whenStarted) -------
+  app.use(async (ctx, next) => {
+    if (!ctx.path.startsWith('/api/')) return next();
+    if (await whenStarted()) return next();
+    ctx.status = 503;
+    ctx.set('Retry-After', '5');
+    ctx.body = { error: 'The server is starting. Try again in a moment.', code: 'starting' };
   });
 
   const json = bodyParser({ enableTypes: ['json'], jsonLimit: '6mb' });

@@ -2,7 +2,7 @@ import path from 'node:path';
 import config from './config.js';
 import { createApp } from './app.js';
 import { getPool } from './db.js';
-import { ensureSchema, setSchemaState } from './schema.js';
+import { beginStartup, ensureSchema, setSchemaState } from './schema.js';
 import { serveStatic } from './static.js';
 
 // Production entry point. In AWS this runs behind the Lambda Web Adapter, which proxies the
@@ -20,10 +20,13 @@ const app = createApp({ frontend: serveStatic(path.resolve('dist')) });
 process.on('unhandledRejection', (error) => console.error('unhandledRejection:', error));
 process.on('uncaughtException', (error) => console.error('uncaughtException:', error));
 
-// Connect (through the ssh tunnel when there is one) and bring the schema up to date before taking
-// requests. If the database is unreachable the server still starts, so the public page keeps
-// working and /api/health reports the problem.
-try {
+// Listen first, then connect (through the ssh tunnel when there is one), bring the schema up to
+// date and build missing address books in the background. API requests wait for that, within a
+// limit (see whenStarted in schema.ts); the public pages and the adapter's readiness probe do not.
+app.listen(config.port, () => console.log(`eisenmail listening on ${config.port}`));
+
+beginStartup(async () => {
+  const started = Date.now();
   await getPool();
   const state = await ensureSchema();
   setSchemaState(state);
@@ -32,9 +35,5 @@ try {
   const { backfill } = await import('./people.js');
   const books = await backfill();
   if (books) console.log(`address book built for ${books} sign-in(s) from stored mail`);
-} catch (err) {
-  setSchemaState('failed');
-  console.error(`database not ready at start-up: ${(err as Error).message}`);
-}
-
-app.listen(config.port, () => console.log(`eisenmail listening on ${config.port}`));
+  console.log(`database ready in ${Date.now() - started} ms`);
+});

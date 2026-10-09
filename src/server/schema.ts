@@ -21,8 +21,11 @@ export async function ensureSchema(file = new URL('../../db/schema.sql', import.
   const current = async () => {
     try {
       return (await query<{ hash: string }>('select hash from schema_meta limit 1')).rows[0]?.hash ?? null;
-    } catch {
-      return null; // table does not exist yet
+    } catch (err) {
+      // only "the table does not exist yet"; anything else (no connection) is a real failure, and
+      // retrying it here would only add another connection timeout to the start-up
+      if ((err as { code?: string }).code === '42P01') return null;
+      throw err;
     }
   };
   if ((await current()) === hash) return 'current';
@@ -35,4 +38,67 @@ export async function ensureSchema(file = new URL('../../db/schema.sql', import.
     await client.query(`insert into schema_meta (id, hash) values (true, $1) on conflict (id) do update set hash = excluded.hash, applied_at = now()`, [hash]);
     return 'applied' as const;
   });
+}
+
+// ---- start-up ---------------------------------------------------------------------------------
+//
+// The server starts listening at once and prepares the database (tunnel, schema, address books)
+// in the background. Lambda gives a new instance 10 seconds to start and API Gateway gives a
+// request 30, so a slow tunnel or a database host that is restarting must not hold the process
+// back: the public pages answer straight away, and an API request waits for the preparation, at
+// most STARTUP_WAIT_MS, then gets a quick "starting, try again" instead of a timeout.
+
+let startup: Promise<void> = Promise.resolve();
+let task: (() => Promise<void>) | null = null;
+let failedAt = 0;
+let waitLimit = 20_000;
+let retryAfter = 15_000;
+
+function run(): void {
+  if (!task) return;
+  const attempt = task;
+  startup = attempt().then(
+    () => {
+      failedAt = 0;
+    },
+    (err) => {
+      failedAt = Date.now();
+      setSchemaState('failed');
+      console.error(`database not ready: ${(err as Error).message}`);
+    },
+  );
+}
+
+/** Starts preparing the database in the background (src/server/main.ts). */
+export function beginStartup(fn: () => Promise<void>): void {
+  task = fn;
+  failedAt = 0;
+  run();
+}
+
+/**
+ * Waits for the database preparation, at most the wait limit. False when it is still running.
+ * After a failure, the next request a little later starts a fresh attempt (the database host
+ * may have been restarting).
+ */
+export async function whenStarted(): Promise<boolean> {
+  if (failedAt && Date.now() - failedAt > retryAfter) {
+    failedAt = 0;
+    run();
+  }
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), waitLimit);
+  });
+  try {
+    return await Promise.race([startup.then(() => true as const), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Tests: shorter waits. */
+export function setStartupTiming(t: { wait?: number; retryAfter?: number }): void {
+  waitLimit = t.wait ?? 20_000;
+  retryAfter = t.retryAfter ?? 15_000;
 }

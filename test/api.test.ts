@@ -605,6 +605,42 @@ test('web app files are served', async () => {
   assert.ok(fs.existsSync('public/icons/apple-touch-icon.png'));
 });
 
+test('start-up: the API waits for the database preparation, within a limit; a failed start is tried again', async () => {
+  const { beginStartup, setSchemaState, setStartupTiming } = await import('../src/server/schema.js');
+  try {
+    setStartupTiming({ wait: 300, retryAfter: 200 });
+    let release!: () => void;
+    beginStartup(() => new Promise<void>((resolve) => (release = resolve)));
+    // the adapter's readiness probe answers at once
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+    // an API request waits, then says "starting" instead of running into a timeout
+    const started = Date.now();
+    const early = await call('GET', '/api/auth/me');
+    assert.deepEqual([early.status, early.json.code, early.headers.get('retry-after')], [503, 'starting', '5']);
+    assert.ok(Date.now() - started < 2000);
+    // a request that is waiting when the preparation finishes goes through
+    const waiting = call('GET', '/api/auth/me');
+    setTimeout(() => release(), 50);
+    assert.equal((await waiting).status, 200);
+
+    // a failed start: requests are not held back, and a later request starts a fresh attempt
+    let attempts = 0;
+    beginStartup(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('connect ETIMEDOUT');
+    });
+    assert.equal((await call('GET', '/api/auth/me')).status, 200);
+    assert.equal(attempts, 1);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal((await call('GET', '/api/auth/me')).status, 200);
+    assert.equal(attempts, 2, 'tried again after the failure');
+  } finally {
+    setStartupTiming({});
+    beginStartup(async () => {});
+    setSchemaState('current');
+  }
+});
+
 test('the www name redirects to the site, keeping path and query, and nothing else is served there', async () => {
   const http = await import('node:http');
   const { default: config } = await import('../src/server/config.js');
