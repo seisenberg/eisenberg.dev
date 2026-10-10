@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import config from './config.js';
-import { query } from './db.js';
+import { query, ssmParameter } from './db.js';
 import { HttpError } from './mail.js';
 import type { PushStatus, PushSubscriptionInput } from '../shared/api.js';
 
@@ -33,9 +33,7 @@ function vapidPrivateKey(): Promise<string | null> {
   privateKey ??= (async () => {
     if (config.push.privateKey) return config.push.privateKey;
     if (!config.push.privateKeySsm) return null;
-    const { SSMClient, GetParameterCommand } = await import('@aws-sdk/client-ssm');
-    const res = await new SSMClient({}).send(new GetParameterCommand({ Name: config.push.privateKeySsm, WithDecryption: true }));
-    return res.Parameter?.Value?.trim() || null;
+    return (await ssmParameter(config.push.privateKeySsm))?.trim() || null;
   })().catch((err) => {
     privateKey = null;
     throw err;

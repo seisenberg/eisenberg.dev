@@ -1,7 +1,7 @@
 import path from 'node:path';
 import config from './config.js';
 import { createApp } from './app.js';
-import { getPool } from './db.js';
+import { getPool, resetConnections } from './db.js';
 import { beginStartup, ensureSchema, setSchemaState } from './schema.js';
 import { serveStatic } from './static.js';
 
@@ -36,4 +36,4 @@ beginStartup(async () => {
   const books = await backfill();
   if (books) console.log(`address book built for ${books} sign-in(s) from stored mail`);
   console.log(`database ready in ${Date.now() - started} ms`);
-});
+}, resetConnections);

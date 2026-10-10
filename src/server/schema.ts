@@ -50,28 +50,47 @@ export async function ensureSchema(file = new URL('../../db/schema.sql', import.
 
 let startup: Promise<void> = Promise.resolve();
 let task: (() => Promise<void>) | null = null;
+let onStuck: () => void = () => {};
+let startedAt = 0;
 let failedAt = 0;
+let attempt = 0;
 let waitLimit = 20_000;
-let retryAfter = 15_000;
+let retryAfter = 5_000;
+let deadline = 25_000;
 
 function run(): void {
   if (!task) return;
-  const attempt = task;
-  startup = attempt().then(
+  const fn = task;
+  const id = ++attempt;
+  startedAt = Date.now();
+  let timer: NodeJS.Timeout | undefined;
+  // An attempt that takes longer than the deadline is abandoned (its connections are dropped), so
+  // that a step that hangs cannot block every request until the instance is recycled. On Lambda
+  // the timer may fire late, after the process thaws; that is when it matters most.
+  const tooLong = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`preparation took longer than ${deadline / 1000} s`)), deadline);
+  });
+  startup = Promise.race([fn(), tooLong]).then(
     () => {
-      failedAt = 0;
+      if (id === attempt) failedAt = 0;
     },
     (err) => {
+      if (id !== attempt) return;
       failedAt = Date.now();
       setSchemaState('failed');
       console.error(`database not ready: ${(err as Error).message}`);
+      onStuck();
     },
-  );
+  ).finally(() => clearTimeout(timer));
 }
 
-/** Starts preparing the database in the background (src/server/main.ts). */
-export function beginStartup(fn: () => Promise<void>): void {
+/**
+ * Starts preparing the database in the background (src/server/main.ts). `reset` drops whatever a
+ * failed or stuck attempt left behind (the pool and the tunnel).
+ */
+export function beginStartup(fn: () => Promise<void>, reset: () => void = () => {}): void {
   task = fn;
+  onStuck = reset;
   failedAt = 0;
   run();
 }
@@ -91,14 +110,17 @@ export async function whenStarted(): Promise<boolean> {
     timer = setTimeout(() => resolve(false), waitLimit);
   });
   try {
-    return await Promise.race([startup.then(() => true as const), late]);
+    const done = await Promise.race([startup.then(() => true as const), late]);
+    if (!done) console.warn(`api request answered 503: database still being prepared after ${Math.round((Date.now() - startedAt) / 1000)} s`);
+    return done;
   } finally {
     clearTimeout(timer);
   }
 }
 
 /** Tests: shorter waits. */
-export function setStartupTiming(t: { wait?: number; retryAfter?: number }): void {
+export function setStartupTiming(t: { wait?: number; retryAfter?: number; deadline?: number }): void {
   waitLimit = t.wait ?? 20_000;
-  retryAfter = t.retryAfter ?? 15_000;
+  retryAfter = t.retryAfter ?? 5_000;
+  deadline = t.deadline ?? 25_000;
 }

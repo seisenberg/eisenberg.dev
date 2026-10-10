@@ -634,6 +634,25 @@ test('start-up: the API waits for the database preparation, within a limit; a fa
     await new Promise((resolve) => setTimeout(resolve, 250));
     assert.equal((await call('GET', '/api/auth/me')).status, 200);
     assert.equal(attempts, 2, 'tried again after the failure');
+
+    // an attempt that hangs is abandoned at the deadline, its connections are dropped, and a
+    // later request starts afresh instead of waiting on it forever
+    setStartupTiming({ wait: 200, retryAfter: 100, deadline: 300 });
+    let resets = 0;
+    let tries = 0;
+    beginStartup(
+      () => {
+        tries += 1;
+        return tries === 1 ? new Promise<void>(() => {}) : Promise.resolve();
+      },
+      () => (resets += 1),
+    );
+    assert.equal((await call('GET', '/api/auth/me')).json.code, 'starting');
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(resets, 1, 'the stuck attempt was given up and its connections dropped');
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal((await call('GET', '/api/auth/me')).status, 200);
+    assert.equal(tries, 2);
   } finally {
     setStartupTiming({});
     beginStartup(async () => {});

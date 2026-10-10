@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import config from './config.js';
-import { query } from './db.js';
+import { query, ssmParameter } from './db.js';
 import { HttpError, type Viewer } from './mail.js';
 import { base32Decode, totpCode, type OtpAlgorithm } from './otp.js';
 import type { OtpEntry, OtpListing } from '../shared/api.js';
@@ -22,9 +22,7 @@ function vaultKey(): Promise<Buffer | null> {
     let encoded = config.vault.key;
     if (!encoded && config.vault.keySsm) {
       try {
-        const { SSMClient, GetParameterCommand } = await import('@aws-sdk/client-ssm');
-        const res = await new SSMClient({}).send(new GetParameterCommand({ Name: config.vault.keySsm, WithDecryption: true }));
-        encoded = res.Parameter?.Value?.trim() ?? null;
+        encoded = (await ssmParameter(config.vault.keySsm))?.trim() ?? null;
       } catch (err) {
         // not created yet: the feature is simply off
         if ((err as { name?: string }).name === 'ParameterNotFound') return null;

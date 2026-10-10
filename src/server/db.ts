@@ -44,8 +44,20 @@ function connectSsh(): Promise<ssh2.Client> {
     const privateKey = await tunnelKey();
     const client = new ssh2.Client();
     await new Promise<void>((resolve, reject) => {
-      client.once('ready', resolve);
-      client.once('error', reject);
+      // readyTimeout covers the handshake; this covers everything, so that a session that never
+      // opens cannot hold every later connection attempt (they all wait on this one)
+      const limit = setTimeout(() => {
+        client.end();
+        reject(new Error('ssh tunnel did not open within 12 s'));
+      }, 12_000);
+      client.once('ready', () => {
+        clearTimeout(limit);
+        resolve();
+      });
+      client.once('error', (err) => {
+        clearTimeout(limit);
+        reject(err);
+      });
       client.connect({
         host: t.host,
         port: t.port,
@@ -118,12 +130,24 @@ function sslOption(): pg.PoolConfig['ssl'] {
  * configuration. Cached for a few minutes: a rotated secret is picked up without a redeploy.
  */
 const secretCache = new Map<string, { value: string; at: number }>();
+
+/**
+ * One SSM client for the process, with timeouts. Without them a call can wait forever: Lambda
+ * freezes the process between requests, and a connection caught in the middle of a call may never
+ * answer after the thaw.
+ */
+let ssm: Promise<import('@aws-sdk/client-ssm').SSMClient> | null = null;
+export async function ssmParameter(name: string): Promise<string | undefined> {
+  const { SSMClient, GetParameterCommand } = await import('@aws-sdk/client-ssm');
+  ssm ??= Promise.resolve(new SSMClient({ maxAttempts: 3, requestHandler: { connectionTimeout: 3_000, requestTimeout: 5_000 } }));
+  const res = await (await ssm).send(new GetParameterCommand({ Name: name, WithDecryption: true }));
+  return res.Parameter?.Value;
+}
+
 async function ssmSecret(name: string): Promise<string> {
   const hit = secretCache.get(name);
   if (hit && Date.now() - hit.at < 5 * 60_000) return hit.value;
-  const { SSMClient, GetParameterCommand } = await import('@aws-sdk/client-ssm');
-  const res = await new SSMClient({}).send(new GetParameterCommand({ Name: name, WithDecryption: true }));
-  const value = res.Parameter?.Value;
+  const value = await ssmParameter(name);
   if (!value) throw new Error(`SSM parameter ${name} is empty`);
   secretCache.set(name, { value, at: Date.now() });
   return value;
@@ -198,4 +222,17 @@ export async function closePool(): Promise<void> {
   poolPromise = null;
   await pool?.end();
   sshClient?.end();
+}
+
+/**
+ * Drops the pool and the tunnel, so that the next query builds both again. Used when start-up
+ * gets stuck: whatever it was waiting on is abandoned rather than waited for.
+ */
+export function resetConnections(): void {
+  const pool = poolPromise;
+  poolPromise = null;
+  void pool?.then((p) => p.end()).catch(() => {});
+  sshClient?.end();
+  sshClient = null;
+  sshConnecting = null;
 }
