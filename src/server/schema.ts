@@ -70,6 +70,8 @@ function run(): void {
   const tooLong = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`preparation took longer than ${deadline / 1000} s`)), deadline);
   });
+  firstStart ||= startedAt;
+  settled = false;
   startup = Promise.race([fn(), tooLong]).then(
     () => {
       if (id === attempt) failedAt = 0;
@@ -81,7 +83,10 @@ function run(): void {
       console.error(`database not ready: ${(err as Error).message}`);
       onStuck();
     },
-  ).finally(() => clearTimeout(timer));
+  ).finally(() => {
+    clearTimeout(timer);
+    if (id === attempt) settled = true;
+  });
 }
 
 /**
@@ -92,6 +97,7 @@ export function beginStartup(fn: () => Promise<void>, reset: () => void = () => 
   task = fn;
   onStuck = reset;
   failedAt = 0;
+  firstStart = 0;
   run();
 }
 
@@ -118,9 +124,23 @@ export async function whenStarted(): Promise<boolean> {
   }
 }
 
+let firstStart = 0;
+let settled = true;
+/**
+ * The adapter's readiness probe (/health): not ready while the first preparation is running,
+ * for at most 8 seconds. Lambda does not freeze a process before it reports ready, so the
+ * preparation gets to run in one go; after the limit the instance serves anyway (the public pages
+ * do not need the database, and API requests wait as above).
+ */
+let readyLimit = 8_000;
+export function readyForTraffic(): boolean {
+  return settled || Date.now() - firstStart > readyLimit;
+}
+
 /** Tests: shorter waits. */
-export function setStartupTiming(t: { wait?: number; retryAfter?: number; deadline?: number }): void {
+export function setStartupTiming(t: { wait?: number; retryAfter?: number; deadline?: number; readyLimit?: number }): void {
   waitLimit = t.wait ?? 20_000;
   retryAfter = t.retryAfter ?? 5_000;
   deadline = t.deadline ?? 25_000;
+  readyLimit = t.readyLimit ?? 8_000;
 }

@@ -608,10 +608,13 @@ test('web app files are served', async () => {
 test('start-up: the API waits for the database preparation, within a limit; a failed start is tried again', async () => {
   const { beginStartup, setSchemaState, setStartupTiming } = await import('../src/server/schema.js');
   try {
-    setStartupTiming({ wait: 300, retryAfter: 200 });
+    setStartupTiming({ wait: 300, retryAfter: 200, readyLimit: 400 });
     let release!: () => void;
     beginStartup(() => new Promise<void>((resolve) => (release = resolve)));
-    // the adapter's readiness probe answers at once
+    // the adapter's readiness probe says "not ready" while the database is prepared (Lambda does
+    // not freeze a process that has not reported ready), and "ready" after the limit regardless
+    assert.equal((await fetch(`${base}/health`)).status, 503);
+    await new Promise((resolve) => setTimeout(resolve, 450));
     assert.equal((await fetch(`${base}/health`)).status, 200);
     // an API request waits, then says "starting" instead of running into a timeout
     const started = Date.now();

@@ -4,12 +4,12 @@ import Router from '@koa/router';
 import { bodyParser } from '@koa/bodyparser';
 import config from './config.js';
 import * as auth from './auth.js';
-import { query } from './db.js';
+import { noteActivity, query } from './db.js';
 import { ingestPending } from './ingest.js';
 import * as mail from './mail.js';
 import * as people from './people.js';
 import { HttpError } from './mail.js';
-import { schemaState, whenStarted } from './schema.js';
+import { readyForTraffic, schemaState, whenStarted } from './schema.js';
 import { sendMail } from './send.js';
 import * as rules from './rules.js';
 import * as push from './push.js';
@@ -127,6 +127,7 @@ export function createApp(options: AppOptions = {}): Koa {
   // ---- start-up: API requests wait for the database preparation (schema.ts, whenStarted) -------
   app.use(async (ctx, next) => {
     if (!ctx.path.startsWith('/api/')) return next();
+    noteActivity();
     if (await whenStarted()) return next();
     ctx.status = 503;
     ctx.set('Retry-After', '5');
@@ -140,7 +141,13 @@ export function createApp(options: AppOptions = {}): Koa {
 
   // Lambda Web Adapter readiness probe: says the process is up, nothing more.
   router.get('/health', (ctx) => {
-    ctx.body = 'ok';
+    if (readyForTraffic()) {
+      ctx.body = 'ok';
+      return;
+    }
+    // still preparing the database: the adapter keeps polling (any status from 500 is "not ready")
+    ctx.status = 503;
+    ctx.body = 'starting';
   });
   router.get('/api/health', async (ctx) => {
     try {

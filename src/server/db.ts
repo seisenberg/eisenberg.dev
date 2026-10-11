@@ -80,21 +80,47 @@ function connectSsh(): Promise<ssh2.Client> {
   return sshConnecting;
 }
 
+const FORWARD_TIMEOUT_MS = 4_000;
+
 function startTunnel(): Promise<number> {
   const server = net.createServer((socket) => {
     socket.on('error', () => socket.destroy());
-    connectSsh()
-      .then((client) => {
-        client.forwardOut('127.0.0.1', socket.localPort ?? 0, '127.0.0.1', config.database.port, (err, stream) => {
-          if (err) {
-            console.error(`ssh forward failed: ${err.message}`);
+    // A session can look open and be dead (its connection dropped while Lambda had the process
+    // frozen): a forward that gets no answer reopens the session once and tries again.
+    const forward = (client: ssh2.Client, retry: boolean) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        console.error(`ssh forward got no answer in ${FORWARD_TIMEOUT_MS / 1000} s: reopening the tunnel`);
+        if (sshClient === client) sshClient = null;
+        client.end();
+        if (!retry) return socket.destroy();
+        connectSsh()
+          .then((fresh) => forward(fresh, false))
+          .catch((err) => {
+            console.error(`ssh tunnel connect failed: ${err.message}`);
             socket.destroy();
-            return;
-          }
-          socket.pipe(stream).pipe(socket);
-          stream.on('error', () => socket.destroy());
-        });
-      })
+          });
+      }, FORWARD_TIMEOUT_MS);
+      client.forwardOut('127.0.0.1', socket.localPort ?? 0, '127.0.0.1', config.database.port, (err, stream) => {
+        if (settled) {
+          stream?.destroy();
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        if (err) {
+          console.error(`ssh forward failed: ${err.message}`);
+          socket.destroy();
+          return;
+        }
+        socket.pipe(stream).pipe(socket);
+        stream.on('error', () => socket.destroy());
+      });
+    };
+    connectSsh()
+      .then((client) => forward(client, true))
       .catch((err) => {
         console.error(`ssh tunnel connect failed: ${err.message}`);
         socket.destroy();
@@ -139,7 +165,7 @@ const secretCache = new Map<string, { value: string; at: number }>();
 let ssm: Promise<import('@aws-sdk/client-ssm').SSMClient> | null = null;
 export async function ssmParameter(name: string): Promise<string | undefined> {
   const { SSMClient, GetParameterCommand } = await import('@aws-sdk/client-ssm');
-  ssm ??= Promise.resolve(new SSMClient({ maxAttempts: 3, requestHandler: { connectionTimeout: 3_000, requestTimeout: 5_000 } }));
+  ssm ??= Promise.resolve(new SSMClient({ maxAttempts: 2, requestHandler: { connectionTimeout: 2_000, requestTimeout: 2_500, throwOnRequestTimeout: true } }));
   const res = await (await ssm).send(new GetParameterCommand({ Name: name, WithDecryption: true }));
   return res.Parameter?.Value;
 }
@@ -236,3 +262,22 @@ export function resetConnections(): void {
   sshClient = null;
   sshConnecting = null;
 }
+
+/**
+ * Called at the start of every API request. Lambda freezes the process between requests; after a
+ * pause of several minutes the idle connections (the ssh session, the database connections in
+ * the pool) have been dropped by the network without the process knowing, and using one would
+ * wait for a timeout. So after such a pause they are rebuilt first. Shorter pauses keep them.
+ */
+const STALE_AFTER_MS = 4 * 60_000;
+let lastActivity = 0;
+export function noteActivity(now = Date.now()): void {
+  if (config.production && lastActivity && now - lastActivity > STALE_AFTER_MS && poolPromise) {
+    console.log(`idle for ${Math.round((now - lastActivity) / 1000)} s: rebuilding the database connections`);
+    resetConnections();
+  }
+  lastActivity = now;
+}
+
+/** Tests only: the tunnel's local listener, without a pool around it. */
+export const tunnelForTests = { start: () => startTunnel() };
