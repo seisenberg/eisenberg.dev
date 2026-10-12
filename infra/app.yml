@@ -307,7 +307,7 @@ Resources:
           ThrottlingRateLimit: 20
         AccessLogSettings:
           DestinationArn: !GetAtt ApiLogs.Arn
-          Format: '{"time":"$context.requestTime","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","ms":"$context.responseLatency","lambda":"$context.integrationErrorMessage","agent":"$context.identity.userAgent"}'
+          Format: '{"id":"$context.requestId","time":"$context.requestTime","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","ms":"$context.responseLatency","lambda":"$context.integrationErrorMessage","agent":"$context.identity.userAgent"}'
 
   HttpApiInvoke:
     Type: AWS::Lambda::Permission
