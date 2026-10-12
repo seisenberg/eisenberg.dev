@@ -17,7 +17,7 @@ Metadata:
       - Label: { default: Your own database instead (only with UseDatabaseStack=false; leave TunnelHost empty for a direct connection) }
         Parameters: [TunnelHost, TunnelHostKey, DbHost, DbPort, DbSslMode]
       - Label: { default: Web site }
-        Parameters: [DomainName, CertificateArn, HostedZoneId, WwwRedirect, TrustedProxyHops]
+        Parameters: [DomainName, CertificateArn, HostedZoneId, WwwRedirect, TrustedProxyHops, WebConcurrency]
       - Label: { default: Push notifications (optional) }
         Parameters: [VapidPublicKey, VapidPrivateKeyParameter]
       - Label: { default: Images }
@@ -146,6 +146,15 @@ Parameters:
     Type: Number
     Default: 1
     Description: 1 for API Gateway alone. 2 if you later put CloudFront in front.
+  WebConcurrency:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    Description: >-
+      Most copies of the web function that may run at once, so a flood of requests to the site
+      cannot take the Lambda capacity the inbox function needs. 0 for no cap, which is required
+      while the account's Lambda concurrency quota is still the new-account 10. After raising
+      that quota (docs/SETUP.md, step 2), 50.
 
   VapidPublicKey:
     Type: String
@@ -167,6 +176,7 @@ Conditions:
   HasPush: !Not [!Equals [!Ref VapidPublicKey, ""]]
   HasOwnerAddresses: !Not [!Equals [!Ref OwnerAddresses, ""]]
   HasDefaultFrom: !Not [!Equals [!Ref DefaultFrom, ""]]
+  HasWebConcurrency: !Not [!Equals [!Ref WebConcurrency, "0"]]
 
 Rules:
   DatabaseStackSuppliesTheTunnel:
@@ -221,6 +231,7 @@ Resources:
       Architectures: [x86_64]
       MemorySize: 1024
       Timeout: 30
+      ReservedConcurrentExecutions: !If [HasWebConcurrency, !Ref WebConcurrency, !Ref "AWS::NoValue"]
       Environment:
         Variables:
           NODE_ENV: production
@@ -275,6 +286,16 @@ Resources:
       # with a custom domain, the generated execute-api URL is switched off
       DisableExecuteApiEndpoint: !If [HasDomain, true, false]
 
+  # One line per request: who asked for what, and what came back. When the site alarm fires,
+  # "lambda" holds the reason for errors the app never saw (a throttled or failed invocation).
+  ApiLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${ProjectName}"
+      RetentionInDays: 30
+
   HttpApiThrottle:
     Type: AWS::ApiGatewayV2::ApiGatewayManagedOverrides
     Properties:
@@ -284,6 +305,9 @@ Resources:
         DefaultRouteSettings:
           ThrottlingBurstLimit: 60
           ThrottlingRateLimit: 20
+        AccessLogSettings:
+          DestinationArn: !GetAtt ApiLogs.Arn
+          Format: '{"time":"$context.requestTime","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","ms":"$context.responseLatency","lambda":"$context.integrationErrorMessage","agent":"$context.identity.userAgent"}'
 
   HttpApiInvoke:
     Type: AWS::Lambda::Permission

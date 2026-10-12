@@ -50,6 +50,11 @@ Do this before anything else. The repository is public, so its settings are part
 3. **Billing, Budgets**: create a monthly cost budget of a few dollars above what "What it costs"
    below predicts, with an email alert. An alert is how you find out if something is wrong.
 4. Optional: switch on CloudTrail (the default 90 day event history is already there).
+5. **Service Quotas, AWS Lambda, Concurrent executions**: request 1000. A new account may run only
+   10 Lambda copies at once, shared by the site and the inbox. A burst of requests to the site
+   (a page full of images, or a bot scanning it) then gets errors and holds up incoming mail.
+   The increase is free and usually granted within a day. Once it is, set `WebConcurrency` to
+   50 on the application stack (step 7) so the site can never use up the inbox's share.
 
 ## 3. Deploy the bootstrap stack
 
