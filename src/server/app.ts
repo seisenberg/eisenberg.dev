@@ -241,13 +241,14 @@ export function createApp(options: AppOptions = {}): Koa {
   const viewer = auth.viewerOf;
   const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
   priv.get('/mail/mailboxes', async (ctx) => {
-    await ingestPending().catch((err) => console.error(`ingest failed: ${err.message}`));
+    // ?refresh=1 (pull to refresh, a notification tapped): look now, even right after the last look
+    const indexed = await ingestPending(ctx.query.refresh ? { minIntervalMs: 0 } : {}).catch((err) => (console.error(`ingest failed: ${err.message}`), 0));
     // retention: at most once a day, whoever happens to open the webmail
     await mail
       .purgeExpired()
       .then((d) => deleteMailObjects(d.s3Keys))
       .catch((err) => console.error(`purge failed: ${err.message}`));
-    ctx.body = await mail.mailboxTree(viewer(ctx));
+    ctx.body = { ...(await mail.mailboxTree(viewer(ctx))), indexed };
   });
   priv.get('/mail/identities', async (ctx) => {
     ctx.body = await mail.identities(viewer(ctx));

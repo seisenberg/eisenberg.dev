@@ -82,6 +82,100 @@ function useSwipe(enabled: boolean, onLeft: () => void, onRight: () => void) {
   };
 }
 
+const PULL_TRIGGER = 64;
+const PULL_MAX = 112;
+const PULL_HOLD = 52;
+
+/**
+ * Pull down at the top of the list to check for new mail, as in iOS Mail. Native listeners,
+ * because stopping the page from scrolling needs a non-passive touchmove. A sideways start is
+ * left alone, so the row swipes still work.
+ */
+function usePullToRefresh(onRefresh: (() => Promise<unknown>) | undefined) {
+  const [el, setEl] = useState<HTMLDivElement | null>(null);
+  const [pull, setPull] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const latest = useRef(onRefresh);
+  latest.current = onRefresh;
+  const enabled = !!onRefresh;
+
+  useEffect(() => {
+    if (!el || !enabled) return;
+    let start: { x: number; y: number } | null = null;
+    let active = false;
+    let distance = 0;
+    let busy = false;
+    const down = (e: TouchEvent) => {
+      start = !busy && el.scrollTop <= 0 && e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+      active = false;
+      distance = 0;
+    };
+    const move = (e: TouchEvent) => {
+      if (!start) return;
+      const dx = e.touches[0].clientX - start.x;
+      const dy = e.touches[0].clientY - start.y;
+      if (!active) {
+        if (dy < 0 || Math.abs(dx) > 8 && Math.abs(dx) > dy) {
+          start = null;
+          return;
+        }
+        if (dy > 8 && dy > Math.abs(dx) * 1.5) {
+          active = true;
+          setDragging(true);
+        }
+      }
+      // at the top, a downward drag has nothing to scroll: keep the page from bouncing instead
+      e.preventDefault();
+      if (!active) return;
+      distance = Math.min(PULL_MAX, Math.max(0, dy - 8) * 0.55);
+      setPull(distance);
+    };
+    const up = () => {
+      const fire = active && distance >= PULL_TRIGGER;
+      start = null;
+      active = false;
+      setDragging(false);
+      if (!fire) return setPull(0);
+      busy = true;
+      setRefreshing(true);
+      setPull(PULL_HOLD);
+      // stay visible long enough to read as "checked", even when the answer is instant
+      Promise.allSettled([latest.current?.(), new Promise((r) => setTimeout(r, 600))]).then(() => {
+        busy = false;
+        setRefreshing(false);
+        setPull(0);
+      });
+    };
+    el.addEventListener("touchstart", down, { passive: true });
+    el.addEventListener("touchmove", move, { passive: false });
+    el.addEventListener("touchend", up);
+    el.addEventListener("touchcancel", up);
+    return () => {
+      el.removeEventListener("touchstart", down);
+      el.removeEventListener("touchmove", move);
+      el.removeEventListener("touchend", up);
+      el.removeEventListener("touchcancel", up);
+    };
+  }, [el, enabled]);
+
+  const indicator = enabled && (
+    <div
+      aria-hidden={!refreshing}
+      role={refreshing ? "status" : undefined}
+      aria-label={refreshing ? "Checking for new mail" : undefined}
+      className={cn("text-muted-foreground flex items-end justify-center overflow-hidden", !dragging && "transition-[height] duration-200")}
+      style={{ height: pull }}
+    >
+      <Loader2
+        className={cn("mb-3 size-5", refreshing && "animate-spin")}
+        style={refreshing ? undefined : { opacity: Math.min(1, pull / PULL_TRIGGER), transform: `rotate(${pull * 4}deg)` }}
+      />
+    </div>
+  );
+  return { ref: setEl, indicator };
+}
+
 function MessageRow({
   m,
   scope,
@@ -204,6 +298,7 @@ export function MessageList({
   onAction,
   emptyText,
   mobile = false,
+  onRefresh,
 }: {
   messages: MessageSummary[];
   scope: Scope;
@@ -217,8 +312,11 @@ export function MessageList({
   onAction: (m: MessageSummary, action: RowAction) => void;
   emptyText: string;
   mobile?: boolean;
+  /** Phone only: pull down at the top of the list to run this. */
+  onRefresh?: () => Promise<unknown>;
 }) {
   const sentinel = useRef<HTMLDivElement>(null);
+  const pull = usePullToRefresh(onRefresh);
   useEffect(() => {
     const el = sentinel.current;
     if (!el || !hasMore) return;
@@ -235,10 +333,16 @@ export function MessageList({
     );
   }
   if (messages.length === 0) {
-    return <div className="text-muted-foreground flex flex-1 items-center justify-center px-6 text-center text-sm">{emptyText}</div>;
+    return (
+      <div ref={pull.ref} className="flex min-h-0 flex-1 flex-col">
+        {pull.indicator}
+        <div className="text-muted-foreground flex flex-1 items-center justify-center px-6 text-center text-sm">{emptyText}</div>
+      </div>
+    );
   }
   return (
-    <div role="listbox" aria-label="Messages" aria-multiselectable={!mobile} className={cn("scroll-thin min-h-0 flex-1 overflow-y-auto", mobile ? "overscroll-y-contain" : "py-1.5")}>
+    <div ref={pull.ref} role="listbox" aria-label="Messages" aria-multiselectable={!mobile} className={cn("scroll-thin min-h-0 flex-1 overflow-y-auto", mobile ? "overscroll-y-contain" : "py-1.5")}>
+      {pull.indicator}
       {messages.map((m, i) => (
         <div key={m.id}>
           {mobile ? (

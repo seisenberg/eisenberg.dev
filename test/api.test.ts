@@ -805,6 +805,17 @@ test('settings: signature per user; filters act when mail is indexed', async () 
   assert.equal((await call('GET', '/api/mail/settings')).json.filters.length, 0);
 });
 
+test('mailboxes: says how many new messages it filed, so the app can reload the list', async () => {
+  await call('GET', '/api/mail/mailboxes');
+  const event = { mail: { timestamp: new Date().toISOString() }, receipt: { recipients: ['fresh@quartzworks.example'], spfVerdict: { status: 'PASS' } } };
+  await local.pool.query('insert into lambda_inbox (message_id, event, email_raw) values ($1, $2, $3)', ['fresh-1', JSON.stringify(event), Buffer.from(rawMail({ To: 'fresh@quartzworks.example', From: 'a@a.example', Subject: 'just arrived' }))]);
+  // right after the last look, a normal poll does not look again; ?refresh=1 does
+  assert.equal(((await call('GET', '/api/mail/mailboxes')).json as MailboxTree).indexed, 0);
+  assert.equal(((await call('GET', '/api/mail/mailboxes?refresh=1')).json as MailboxTree).indexed, 1);
+  assert.equal((await first('mailbox=inbox&q=just%20arrived')).subject, 'just arrived');
+  assert.equal(((await call('GET', '/api/mail/mailboxes?refresh=1')).json as MailboxTree).indexed, 0);
+});
+
 test('retention: Trash and Junk empty themselves after the configured time', async () => {
   await deliver('old-trash', 'retention@quartzworks.example', { From: 'a@a.example', Subject: 'old trash' });
   await deliver('new-trash', 'retention@quartzworks.example', { From: 'a@a.example', Subject: 'new trash' });

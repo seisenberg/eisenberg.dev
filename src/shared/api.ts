@@ -32,6 +32,8 @@ export interface MailboxTree {
   junk: Counts;
   trash: Counts;
   domains: DomainNode[];
+  /** Messages this request filed from the inbox queue. Above 0, any message list fetched at the same time may be missing them. */
+  indexed?: number;
 }
 
 export interface MessageSummary {

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
-import { type InfiniteData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type InfiniteData, type QueryClient, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { get, patch, post } from "@/lib/api";
 import type { Draft, Identities, MailboxTree, MailboxView, MailSettings, MessageDetail, MessageList, MessagePatch, MessageSummary, PersonDetail } from "../../shared/api";
@@ -109,8 +109,31 @@ export function scopeTitle(scope: Scope, personName?: string): string {
 }
 
 export function useMailboxes() {
+  const qc = useQueryClient();
   // The server indexes newly received mail when this is fetched, so polling it is what makes new mail appear.
-  return useQuery({ queryKey: ["mailboxes"], queryFn: () => get<MailboxTree>("/mail/mailboxes"), refetchInterval: 30_000, refetchOnWindowFocus: true });
+  // The message list is fetched at the same moment (opening the app, a notification tap) and can
+  // miss what this request just filed, so it is fetched again whenever something new came in.
+  return useQuery({
+    queryKey: ["mailboxes"],
+    queryFn: async () => {
+      const tree = await get<MailboxTree>("/mail/mailboxes");
+      if (tree.indexed) void qc.invalidateQueries({ queryKey: ["messages"] });
+      return tree;
+    },
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+/** Check for new mail now (pull to refresh, a tapped notification): file it first, then reload the list, so the list cannot miss it. */
+export async function refreshMail(qc: QueryClient) {
+  qc.setQueryData(["mailboxes"], await get<MailboxTree>("/mail/mailboxes?refresh=1"));
+  await qc.refetchQueries({ queryKey: ["messages"], type: "active" });
+}
+
+export function useRefreshMail() {
+  const qc = useQueryClient();
+  return () => refreshMail(qc);
 }
 
 export function useIdentities() {

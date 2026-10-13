@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 import { get } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { Compose, draftFor, type Draft } from "./compose";
-import { scopeTitle, useDeleteForever, useDrafts, useEmptyMailbox, useIdentities, useMailboxes, useMailLocation, useMailSettings, useMarkAllRead, useMessage, useMessages, usePatchMessages, usePerson } from "./data";
+import { scopeTitle, useDeleteForever, useDrafts, useEmptyMailbox, useIdentities, useMailboxes, useMailLocation, useMailSettings, useMarkAllRead, useMessage, useMessages, usePatchMessages, usePerson, useRefreshMail } from "./data";
 import { DraftsList } from "./drafts-list";
 import { InstallHint } from "./install-hint";
 import { MessageList, type RowAction } from "./message-list";
@@ -58,6 +58,7 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
   const tree = useMailboxes();
   const identities = useIdentities();
   const list = useMessages(scope, q);
+  const refreshMail = useRefreshMail();
   const patchMessages = usePatchMessages();
   const deleteForever = useDeleteForever();
   const emptyMailbox = useEmptyMailbox();
@@ -310,6 +311,7 @@ export default function MailPage({ header, footer, tabs }: { header: React.React
   ) : (
     <MessageList
       mobile={mobile}
+      onRefresh={mobile ? refreshMail : undefined}
       messages={messages}
       scope={scope}
       selected={selected}

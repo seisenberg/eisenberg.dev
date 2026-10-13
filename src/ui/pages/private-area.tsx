@@ -11,6 +11,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { get, post, setUnauthenticatedHandler } from "@/lib/api";
 import { currentSubscription, serviceWorker } from "@/lib/pwa";
 import { useSession } from "@/lib/session";
+import { refreshMail } from "../mail/data";
 import { cn } from "@/lib/utils";
 import MailPage from "../mail/mail-page";
 
@@ -169,8 +170,7 @@ export default function PrivateArea({ section }: { section: Section }) {
       const data = e.data as { type?: string; url?: string } | null;
       if (data?.type === "eisenmail:navigate" && typeof data.url === "string" && data.url.startsWith("/") && !data.url.startsWith("//")) {
         navigate(data.url);
-        void qc.invalidateQueries({ queryKey: ["mailboxes"] });
-        void qc.invalidateQueries({ queryKey: ["messages"] });
+        void refreshMail(qc).catch(() => {});
       }
     };
     navigator.serviceWorker?.addEventListener("message", onMessage);
