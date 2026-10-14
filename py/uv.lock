@@ -92,30 +92,30 @@ wheels = [
 
 [[package]]
 name = "awslambdaric"
-version = "4.1.0"
+version = "4.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "simplejson" },
     { name = "snapshot-restore-py" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9e/58/6e209eb9a4672be587114803cd2e3fa4e08d38dc5464be50e2da0c701542/awslambdaric-4.1.0.tar.gz", hash = "sha256:73a349ce4118632ac7c63bd45999c0be476d0e14a184da682b9cd83c6c05d032", size = 4507845, upload-time = "2026-09-28T15:38:23.047Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/fb/22ae3876f8576fad1e697e455897f68cfeb7ae3932d06805c9f73787c2de/awslambdaric-4.2.0.tar.gz", hash = "sha256:2f5d4831a1180f31a73ac5c9911599529e22cd1ba5b43ef15f0002276897501c", size = 4508436, upload-time = "2026-10-07T10:41:41.884Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1b/34/ac1db7ba7d50bf4ac5674539782458672aaa4a8824f68d1a0d5cb50e3c94/awslambdaric-4.1.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:08191d95ebf923032364dffe1b6b56a4e9c0b9909127ae3856088141d00c11d0", size = 355866, upload-time = "2026-09-28T18:51:32.51Z" },
-    { url = "https://files.pythonhosted.org/packages/0e/49/98aef950dc671d8eb93e73cb922b20b2edb95d890aaa70188b90ba41c477/awslambdaric-4.1.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:57391ab8913fa80c76a02e76234e27621d951f91d2e3ad46389edacc0bb966ce", size = 357754, upload-time = "2026-09-28T21:07:25.613Z" },
-    { url = "https://files.pythonhosted.org/packages/6d/2e/c23b8cccd8d7ab0a66c447e6a3e934649926378531c14f974b04fd085f83/awslambdaric-4.1.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:18a88b3c959c8d863489b6e9260f433ac38cca2067dd84d792b5a4089594fa6e", size = 1332717, upload-time = "2026-09-28T18:51:34.043Z" },
-    { url = "https://files.pythonhosted.org/packages/3f/25/f7a8253c7b6c84eca99b21c7cb45e5b2143330b58de03ed91cce2a38ce6b/awslambdaric-4.1.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:919e40c7f8914f627826123d371a95fd36020c6b4e9cef3e09530d864b5457ce", size = 1387482, upload-time = "2026-09-28T21:07:27.577Z" },
-    { url = "https://files.pythonhosted.org/packages/cf/43/1bcfb1436baf67c9326e470c02e2667cafec2ae9136c7e323a67c8b3277f/awslambdaric-4.1.0-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:7e69b1e3af67582e61ed4fcbf15db357b388675b3fdb8f4c39fd908900bf54bb", size = 357320, upload-time = "2026-09-28T18:51:35.165Z" },
-    { url = "https://files.pythonhosted.org/packages/4c/79/9344cee0ce07e9c31ca3bcdaa469b405063293a76cb67386a0edff97b933/awslambdaric-4.1.0-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5c98869643b56cfcbf12df754ac6f34bd63e3ef294d83038e0ed708166b4397f", size = 358776, upload-time = "2026-09-28T21:07:28.978Z" },
-    { url = "https://files.pythonhosted.org/packages/30/af/4cee6d981c49911636e7bd21ace669c4e7a7475e8f939a73db3a20e52fd8/awslambdaric-4.1.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:7c25ad4c55b75a38f6f7f59f3a1c417b18b1f7060268789b7e918c8932f057e5", size = 1334560, upload-time = "2026-09-28T18:51:36.448Z" },
-    { url = "https://files.pythonhosted.org/packages/c5/8f/611565d14399b88cd58f8ea4489dbf09ae9815a7144f4bcd77ce182a50e2/awslambdaric-4.1.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:11cab8a36bfbd6ddded09c6800c89dbe34fb48adbb7818606f9a1c7bee711b91", size = 1388637, upload-time = "2026-09-28T21:07:30.337Z" },
-    { url = "https://files.pythonhosted.org/packages/bf/24/bb34c0fbcfca0b08f96db5fd411dcbab740cfa9425a97813b42edc7fbc14/awslambdaric-4.1.0-cp315-cp315-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:b2006e853c6e3fe79be82c2b08ab1d5b58daf4e22aceff540563f496d58349dd", size = 356356, upload-time = "2026-09-28T18:51:37.602Z" },
-    { url = "https://files.pythonhosted.org/packages/e8/4b/f20663f84c7b13afbd3b8a95738b5ad43c563a069009ebc1fed9ebcdb3e2/awslambdaric-4.1.0-cp315-cp315-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:d62568cae000faf042fc752de529c872c888f009fcff3e2951cc5d412116dfb4", size = 358997, upload-time = "2026-09-28T21:07:31.51Z" },
-    { url = "https://files.pythonhosted.org/packages/36/cd/4c5f5d9085b287a6f21b684d25529ab1d2e4e509572289da6ab2b81bfa27/awslambdaric-4.1.0-cp315-cp315-musllinux_1_2_aarch64.whl", hash = "sha256:16928cc7ec6d0938ba75564e7ca687d4f6c91882b0b2681d0cc9239ab1d43b46", size = 1333324, upload-time = "2026-09-28T18:51:38.801Z" },
-    { url = "https://files.pythonhosted.org/packages/d0/d7/fe9d79dd47e08b353f1fabf9f68124e89aa4667537e0429fb138d03cd863/awslambdaric-4.1.0-cp315-cp315-musllinux_1_2_x86_64.whl", hash = "sha256:bbac6826a99120eb4a1499a11b325bf6cfef208c4023a79e3c8c7d3cddcc8e24", size = 1388120, upload-time = "2026-09-28T21:07:32.858Z" },
-    { url = "https://files.pythonhosted.org/packages/da/80/491001fa4cad3885d22080e929d20fe088f0730862f8eba516014c4eab9a/awslambdaric-4.1.0-cp315-cp315t-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9b492f41956d72876390a325fd6ce201a476932515dd552139eb8e8b9d776399", size = 357644, upload-time = "2026-09-28T18:51:39.948Z" },
-    { url = "https://files.pythonhosted.org/packages/d8/e1/f55d834d4dd376bf3209ffbcfa62c616c8e40c6958db38e58eb752d9e22c/awslambdaric-4.1.0-cp315-cp315t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:840f56a24b37fcf358982eeb1a977dfd5751cbc83c0a02508cbcf8216a094b19", size = 360051, upload-time = "2026-09-28T21:07:34.252Z" },
-    { url = "https://files.pythonhosted.org/packages/b7/f1/6b150d219af49688d2c20166da64d40b225a680457a4425fcde35cf8bf8b/awslambdaric-4.1.0-cp315-cp315t-musllinux_1_2_aarch64.whl", hash = "sha256:c279144fa70f6e33787fe4b5b4894f6be777e61b28b12eb5245826a51f94e04b", size = 1335093, upload-time = "2026-09-28T18:51:41.322Z" },
-    { url = "https://files.pythonhosted.org/packages/0e/6f/e1b51ad22645e3637a662927a30395cfc662d8841d24b98f5e33dcd63227/awslambdaric-4.1.0-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:bbca1f4cbef2bae91d01d7196600cb781f83746a7f51511c9f44e76ac8a34525", size = 1388954, upload-time = "2026-09-28T21:07:35.691Z" },
+    { url = "https://files.pythonhosted.org/packages/4b/27/4ed77620bef143555679c3a45816d5cbc7ece888d78e2025e0a5d0c0c3c9/awslambdaric-4.2.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:41a10ebedef9a5a21512029bb36cefe682f88f1ffdfa3b86969867c358064fa1", size = 356342, upload-time = "2026-10-07T10:53:42.66Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/c6/a03db40ef0427f18257ee6feeb5fe267d9fc159c51719ee904100f0c90f5/awslambdaric-4.2.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:21e2fba9019800a3b14b1538295213d3ec3c596886ccee7d80a80bec43f928f9", size = 358228, upload-time = "2026-10-07T10:41:28.87Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/51/1394f2c83980a2ad77f9ca5b97d28959197b2a64d9a7f00627fe88b400d4/awslambdaric-4.2.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:2aa06a76bab2e82b217c53a933945b3c3169127a93491176c8c2b3567ec116c2", size = 1333191, upload-time = "2026-10-07T10:53:43.973Z" },
+    { url = "https://files.pythonhosted.org/packages/56/f9/c9e33182e96e51bc3d875933ead4c32d7400c68582a1254c5179dbf07811/awslambdaric-4.2.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:79121c593a450e4e3f0575dc382d5cf8a3ca196799733a97ccd7377a6f75a26f", size = 1387961, upload-time = "2026-10-07T10:41:30.274Z" },
+    { url = "https://files.pythonhosted.org/packages/40/15/93673e623347dd65485fbd0834ff45b09e99e0924e0788dc130ab1e5c336/awslambdaric-4.2.0-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:6a7baef305472941975ad62967f0886498c365c78314cd9d327883b0f4c132a0", size = 357797, upload-time = "2026-10-07T10:53:45.808Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/de/a94ac487851e415208ef9c8f9ec0d650629ee26bc08def2f2e5c883b2ecc/awslambdaric-4.2.0-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:f276fec5a1f76ea154327a47a2dbf920f63565d5b622b5a1043ad7797378ef4d", size = 359255, upload-time = "2026-10-07T10:41:31.874Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/25/07d014c78d7d5cb0041b221b42a4acb827866b33fb4cd8a442c9cdd865e4/awslambdaric-4.2.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:68e8310eb7b278fb05c916e3ade6236e26e2e029742a5fb28a3bd74cd43cd5b2", size = 1335034, upload-time = "2026-10-07T10:53:47.403Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/c2/d77f3259bd619ff5fcb938673045d18b8f5b797f4dfa86cc7459207167dc/awslambdaric-4.2.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:7bfed9a07c70f0505a0d3a290b928a6e988cbef21f4d2118a75e2e31f03607f9", size = 1389108, upload-time = "2026-10-07T10:41:33.779Z" },
+    { url = "https://files.pythonhosted.org/packages/22/68/772e9a15da21fac9c6e8ada8d8b7fe0564a624a8dc18c512f05cf923d60a/awslambdaric-4.2.0-cp315-cp315-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:7b448a7bb48e265d2e19b59c80bb769ff85ae516661cc7bea38848b7e80e9583", size = 356828, upload-time = "2026-10-07T10:53:48.724Z" },
+    { url = "https://files.pythonhosted.org/packages/47/08/c023482b8847aaaf2824d2a41273a8fc5a23006a103ddd2fea515440c6e5/awslambdaric-4.2.0-cp315-cp315-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:d8b3ce8c9a650dbc99f4d52452375c06ec63d1c89b5ac45b5f041d44d947dbad", size = 359475, upload-time = "2026-10-07T10:41:35.121Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/5a/2f36d143a9b4213f185b342d2e85e9a0a5ab54620d176af843bc64e28613/awslambdaric-4.2.0-cp315-cp315-musllinux_1_2_aarch64.whl", hash = "sha256:5b2ea2ccc28fdb46b6928fcbd6585575f6974d31961b75610fd739c8286c0511", size = 1333800, upload-time = "2026-10-07T10:53:50.04Z" },
+    { url = "https://files.pythonhosted.org/packages/77/cb/1a566936f9904899ba0319757bdac1dfe6994826550438a5ba21197cc649/awslambdaric-4.2.0-cp315-cp315-musllinux_1_2_x86_64.whl", hash = "sha256:a3ecd7666f840c3d723273f46822a82c739c7e9cb000ad11c8fa5085e5bb6b5e", size = 1388598, upload-time = "2026-10-07T10:41:36.382Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/cc/e005dbb6766b7edcf8d095eae74e75993f4b757a3f2538f9cbde91f32539/awslambdaric-4.2.0-cp315-cp315t-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:3f62169d686cd1e5a84914048799d16fca283d230cdb5cd522b4bd3fbb4a13d6", size = 358122, upload-time = "2026-10-07T10:53:51.324Z" },
+    { url = "https://files.pythonhosted.org/packages/78/af/c518b240e87e440f842b1f63472fad439624dff961d6846d42469dce5642/awslambdaric-4.2.0-cp315-cp315t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7f5ca2ee91cd4b0ce31a695a5fb91d665890963e86646a5d801b5640387d9b21", size = 360530, upload-time = "2026-10-07T10:41:37.535Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/f1/145a170dcd2880e709ec1786433347d51ad86c392f73d14ce3ba65562434/awslambdaric-4.2.0-cp315-cp315t-musllinux_1_2_aarch64.whl", hash = "sha256:9e820f71ecd13c6070bac554db8f99e18cdd36a4158b0adbc8b6b89037bde804", size = 1335576, upload-time = "2026-10-07T10:53:52.916Z" },
+    { url = "https://files.pythonhosted.org/packages/93/bc/ca95ef83a1a4a5e0c8a473b3d46dd7f1d753232d89c651bd5cd1e680afff/awslambdaric-4.2.0-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:dd74d0b25ae20bb659d88b9beaf22e63e6c2d6d9cc452bc22e979b23bb29221e", size = 1389434, upload-time = "2026-10-07T10:41:38.934Z" },
 ]
 
 [[package]]
@@ -171,30 +171,30 @@ wheels = [
 
 [[package]]
 name = "boto3"
-version = "1.43.108"
+version = "1.43.111"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore" },
     { name = "jmespath" },
     { name = "s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/48/59/fb93b6ebd9ad43eb9a58c7a6da51a0fe24ab0c04bc4d534a0bfc5eba7f59/boto3-1.43.108.tar.gz", hash = "sha256:03341f089158368acf83e921aca98b706095322ca52bc4c039a616940aa5ad41", size = 112682, upload-time = "2026-10-02T19:32:25.211Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/d3/fa092ae1c109100d0c5c14c69a316cd6d53c05fb57183fa77b1fcdef86ce/boto3-1.43.111.tar.gz", hash = "sha256:5ae342a16c848909cd42d4be404f69d9082e5705460198d4d3327eca5f6cddcb", size = 112656, upload-time = "2026-10-09T19:27:48.995Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/74/e4/7e88c40e9f61888e12dac0de41a5fddc2bcd1c3992d9b28e17d915cce0df/boto3-1.43.108-py3-none-any.whl", hash = "sha256:19e9da95ef0c494e27052049a42137550e66730509bb613e76eaa30ddf9a7170", size = 140045, upload-time = "2026-10-02T19:32:23.826Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/3b/bca42f8f7b76e567c66cc39bacc6bf31b353c9edfbb0fb1f5c534fc65369/boto3-1.43.111-py3-none-any.whl", hash = "sha256:c79994619c8d89e45f6fd0edc5c5b5a70c9358f00423f4c99cb64931f89ecf37", size = 140042, upload-time = "2026-10-09T19:27:47.599Z" },
 ]
 
 [[package]]
 name = "botocore"
-version = "1.43.108"
+version = "1.43.113"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jmespath" },
     { name = "python-dateutil" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/61/16/6b4477f433da2c11193802f538330ce080076c2f38d817ad437ed3cd1465/botocore-1.43.108.tar.gz", hash = "sha256:ee4f75cf3bdbb0da7912e089950e8112f692016539d939312c771499958e6cfd", size = 16312879, upload-time = "2026-10-02T19:32:20.797Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c5/43/e4b25ea3f83142dc13dda0313d5d818e20173c2c710d658dd206f67763e8/botocore-1.43.113.tar.gz", hash = "sha256:941d3f0e289540da7c49d5e2dc022f992e3638127a02a74a0c91df2661bd98ef", size = 16361430, upload-time = "2026-10-13T19:24:54.872Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/0b/4670b7e23914b5cc357be5ca45fae503b57d98ecff4b3eabea70412809fd/botocore-1.43.108-py3-none-any.whl", hash = "sha256:ab9d16c6b4350aaa54ed28202dfa2998b2d735fdbf3247eb60af469d8d48a5b8", size = 16008194, upload-time = "2026-10-02T19:32:15.086Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/61/a9c26912e18ddf6529d628e945711ce94ed62056d31457f25a842fd47929/botocore-1.43.113-py3-none-any.whl", hash = "sha256:8908e4a5fe94a06801a7bf4c451717a38145cc4ffa41aaffa50665940b64b4fa", size = 16063913, upload-time = "2026-10-13T19:24:52.219Z" },
 ]
 
 [[package]]
