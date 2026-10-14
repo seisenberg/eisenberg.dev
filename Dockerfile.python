@@ -6,7 +6,7 @@
 # Everything is configured through environment variables (see py/config.py). No secrets are
 # baked into the image: the SSH tunnel key is read from SSM at runtime (SSH_TUNNEL_KEY_SSM).
 # uv installs the dependencies; a stage of its own, so that Dependabot sees the version.
-FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.1 AS uv
 
 # ---- build: the exact versions of py/uv.lock, into a virtual environment ----------------------
 FROM python:3.14-slim-trixie AS build
