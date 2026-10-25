@@ -13,15 +13,15 @@ description = "eisenmail inbound mail: forward, reply relay, push notifications"
 # The interpreter itself comes from the base image in Dockerfile.python; CI reads it from there.
 requires-python = ">=3.14"
 dependencies = [
-    "boto3>=1.43.108,<2",
+    "boto3>=1.43.118,<2",
     "psycopg[binary]>=3.3.6,<4",
     # Only needed when SSH_TUNNEL_HOST is set. The tunnel is implemented directly on paramiko
     # (see db.py), so there is no sshtunnel dependency.
-    "paramiko>=5.0.0,<6",
+    "paramiko>=5.1.0,<6",
     # Web Push notifications (push.py); imported lazily, only used when a VAPID key is configured.
     "pywebpush>=2.5.0,<3",
     # Lambda runtime interface client: only exists (and is only needed) inside the container.
-    "awslambdaric>=4.1,<5; sys_platform == 'linux'",
+    "awslambdaric>=4.2.2,<5; sys_platform == 'linux'",
 ]
 
 [dependency-groups]
