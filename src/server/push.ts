@@ -95,7 +95,7 @@ export interface PushPayload {
 export async function sendToUser(userId: number, payload: PushPayload): Promise<{ sent: number; failed: number }> {
   const key = await vapidPrivateKey();
   if (!config.push.publicKey || !key) throw new HttpError(503, 'Push notifications are not configured on this server (VAPID keys missing)', 'push_disabled');
-  const { default: webpush } = await import('web-push');
+  const webpush = await import('web-push');
   const subs = await query<{ endpoint: string; p256dh: string; auth: string }>('select endpoint, p256dh, auth from push_subscriptions where user_id = $1 limit 20', [userId]);
   let sent = 0;
   let failed = 0;

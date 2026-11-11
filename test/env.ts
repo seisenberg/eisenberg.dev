@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import webpush from 'web-push';
+import * as webpush from 'web-push';
 
 export const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'eisenmail-test-'));
 process.env.NODE_ENV = 'test';

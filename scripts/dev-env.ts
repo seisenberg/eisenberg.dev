@@ -3,7 +3,7 @@
 // This file must not import any server code.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import webpush from 'web-push';
+import * as webpush from 'web-push';
 
 export const DEV_DOMAINS = ['eisenberg.dev', 'harborlight.example', 'quartzworks.example'];
 
