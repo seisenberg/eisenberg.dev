@@ -449,3 +449,37 @@ def test_naive_last_modified_is_treated_as_utc(processor, s3, db):
     assert reconcile.run(processor)["replayed"] == 1
     assert db.inbox[message_id]["event"]["mail"]["timestamp"] == "2026-10-03T10:00:00.000Z"
     assert reconcile._iso(datetime(2026, 1, 2, 3, 4, 5, 678000, tzinfo=timezone(timedelta(hours=2)))) == "2026-01-02T01:04:05.678Z"
+
+
+@pytest.mark.parametrize("error", [EOFError(), ConnectionRefusedError(), TimeoutError()])
+def test_unreachable_database_skips_the_run_without_failing(processor, s3, ses, db, caplog, error):
+    put(s3, 1)
+    db.fail = lambda name: error if name == "handled_message_ids" else None
+    with caplog.at_level(logging.WARNING):
+        summary = reconcile.run(processor)
+    assert summary == {"listed": 1, "missing": 0, "replayed": 0, "unroutable": 0, "failed": 0, "skipped": 1}
+    assert ses.sent == [] and "database not reachable" in caplog.text
+    db.fail = None
+    assert reconcile.run(processor)["replayed"] == 1               # the next run catches up
+
+
+def test_ssh_and_postgres_connection_errors_count_as_unreachable():
+    import paramiko
+    import psycopg
+
+    import db as dbmod
+    assert reconcile.database_unreachable(paramiko.SSHException("Error reading SSH protocol banner"))
+    assert reconcile.database_unreachable(psycopg.OperationalError("the database system is shutting down"))
+    assert reconcile.database_unreachable(dbmod.TunnelError("SSH authentication failed"))
+    assert not reconcile.database_unreachable(dbmod.HostKeyMismatch("does not match"))
+    assert not reconcile.database_unreachable(ValueError("a bug"))
+
+
+@pytest.mark.parametrize("error", [ValueError("a bug"), "host key"])
+def test_other_failures_and_a_host_key_mismatch_still_fail_the_run(processor, s3, db, error):
+    import db as dbmod
+    put(s3, 1)
+    exc = dbmod.HostKeyMismatch("does not match") if error == "host key" else error
+    db.fail = lambda name: exc if name == "handled_message_ids" else None
+    with pytest.raises(type(exc)):
+        reconcile.run(processor)

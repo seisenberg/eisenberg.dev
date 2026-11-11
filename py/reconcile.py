@@ -216,6 +216,23 @@ def _remaining_ms(context: Any) -> Optional[int]:
         return None
 
 
+def database_unreachable(exc: BaseException) -> bool:
+    """The database host cannot be reached right now. Its usual cause is the reboot for security
+    updates, which also refuses new SSH logins for the five minutes before it. A host key that does
+    not match is NOT this: it may be someone in the middle, and must keep failing loudly."""
+    import db
+
+    if isinstance(exc, db.HostKeyMismatch):
+        return False
+    try:
+        import paramiko
+
+        ssh_errors: Tuple[type, ...] = (paramiko.SSHException,)
+    except ImportError:  # pragma: no cover - paramiko is a dependency
+        ssh_errors = ()
+    return isinstance(exc, (OSError, EOFError, db.TunnelError, *db.RECONNECT_ERRORS, *ssh_errors))
+
+
 def run(processor: Any, context: Any = None) -> Dict[str, int]:
     """One reconcile pass. Never raises for a single message; what fails is retried next run."""
     cfg = processor.cfg
@@ -225,7 +242,16 @@ def run(processor: Any, context: Any = None) -> Dict[str, int]:
     candidates = list_candidates(processor.s3, cfg.mail_bucket, cfg.mail_prefix, now,
                                  timedelta(hours=cfg.reconcile_max_age_hours))
     summary["listed"] = len(candidates)
-    handled = processor.db.handled_message_ids([message_id for _, message_id in candidates]) if candidates else set()
+    try:
+        handled = processor.db.handled_message_ids([message_id for _, message_id in candidates]) if candidates else set()
+    except Exception as exc:
+        if not database_unreachable(exc):
+            raise
+        # Nothing is lost by skipping: the next run, 15 minutes later, checks the same window.
+        # Raising here only set off the inbox-errors alarm whenever a run met the host's reboot.
+        log.warning("reconcile: database not reachable (%s: %s); skipped until the next run", type(exc).__name__, exc)
+        summary["skipped"] = 1
+        return summary
     missing = [(modified, message_id) for modified, message_id in candidates if message_id not in handled]
     summary["missing"] = len(missing)
 
