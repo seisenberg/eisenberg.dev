@@ -46,7 +46,7 @@ backups that can be restored anywhere.
 
 | Layer | Choices |
 | --- | --- |
-| Receiving | SES receipt rule, S3, Python 3.14 Lambda container |
+| Receiving | SES receipt rule, S3, Python 3.15 Lambda container |
 | Web | Koa on the AWS Lambda Web Adapter, API Gateway HTTP API |
 | UI | React 19, Tailwind 4, shadcn/ui on Radix, TanStack Query, no client-side state library |
 | Data | PostgreSQL on a tiny EC2 instance, reached through an ssh tunnel that can only forward one port |
@@ -235,8 +235,8 @@ Found a problem? See the reporting section of [SECURITY.md](SECURITY.md).
 
 ## Run it locally
 
-Needs Node 26 or later, and [uv](https://docs.astral.sh/uv/) for the Python tests (it fetches
-Python 3.14 itself). No Docker, no AWS account, no system PostgreSQL.
+Needs Node 26 or later, and [uv](https://docs.astral.sh/uv/) 0.13.9 or later for the Python tests (it fetches
+Python 3.15 itself). No Docker, no AWS account, no system PostgreSQL.
 
 ```bash
 npm install

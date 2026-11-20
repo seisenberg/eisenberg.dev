@@ -76,8 +76,13 @@ jobs:
           version=$(sed -n 's/^FROM python:\([0-9][0-9.]*\).*/\1/p' Dockerfile.python | head -n 1)
           test -n "$version"
           echo "python=$version" >> "$GITHUB_OUTPUT"
+          # and the uv the image is built with, so CI locks and installs exactly as the image does
+          uv=$(sed -n 's/^FROM ghcr.io\/astral-sh\/uv:\([0-9][0-9.]*\).*/\1/p' Dockerfile.python | head -n 1)
+          test -n "$uv"
+          echo "uv=$uv" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
+          version: ${{ steps.runtime.outputs.uv }}
           python-version: ${{ steps.runtime.outputs.python }}
           working-directory: py
       # --locked: exactly the versions in py/uv.lock, and a failure if the lock file does not
@@ -119,8 +124,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: uv version of the container image
+        id: runtime
+        run: |
+          uv=$(sed -n 's/^FROM ghcr.io\/astral-sh\/uv:\([0-9][0-9.]*\).*/\1/p' Dockerfile.python | head -n 1)
+          test -n "$uv"
+          echo "uv=$uv" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
+          version: ${{ steps.runtime.outputs.uv }}
           enable-cache: false # one small tool, nothing worth caching
       - run: uvx --from 'cfn-lint==1.*' cfn-lint infra/*.yml
       - name: Shell scripts
