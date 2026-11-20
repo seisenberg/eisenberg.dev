@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepares a fresh Ubuntu 26.04 LTS host (PostgreSQL 18) as the eisenmail database server:
+# Prepares a fresh Ubuntu 26.04 LTS host (PostgreSQL 19) as the eisenmail database server:
 #   - PostgreSQL listening on localhost only, one database, one application role,
 #     settings sized for a machine with 0.5 to 1 GB of memory
 #   - a "tunnel" account that can do exactly one thing: forward a port to that PostgreSQL
@@ -21,12 +21,18 @@
 #                 docs/BACKUP-AND-MIGRATION.md says, then clear your terminal. The nightly dump
 #                 stays on the machine, in /var/backups/eisenmail.
 #
-# Optional in both modes: DB_NAME (default emails), DB_USER (default eisenmail).
+# Optional in both modes: DB_NAME (default emails), DB_USER (default eisenmail),
+# PG_MAJOR (default 19: the PostgreSQL major version a new host gets).
 #
 # Running it again is safe. It keeps the existing password and tunnel key unless you ask:
 #   ROTATE_DB_PASSWORD=1   set a new database password
 #   ROTATE_TUNNEL_KEY=1    aws mode: make a new tunnel key pair
 #                          (manual mode: pass the new TUNNEL_PUBLIC_KEY instead)
+#
+# A host set up with an older PostgreSQL keeps it until you ask for the move:
+#   UPGRADE_POSTGRES=1     take a backup, install PostgreSQL PG_MAJOR, and move the database to it
+#                          with pg_upgradecluster. The old version stays installed but stopped, for
+#                          a way back (docs/BACKUP-AND-MIGRATION.md, "A new PostgreSQL version").
 set -euo pipefail
 
 CONF=/etc/eisenmail/host.env                       # non-secret settings, kept for the next run
@@ -56,6 +62,7 @@ if [[ -z ${MODE:-} ]]; then
 fi
 
 PROJECT_NAME=${PROJECT_NAME:-eisenmail}
+PG_MAJOR=${PG_MAJOR:-19}
 DB_NAME=${DB_NAME:-emails}
 DB_USER=${DB_USER:-eisenmail}
 BACKUP_BUCKET=${BACKUP_BUCKET:-}
@@ -64,6 +71,7 @@ TUNNEL_PUBLIC_KEY=${TUNNEL_PUBLIC_KEY:-}
 
 [[ $DB_NAME =~ ^[a-z_][a-z0-9_]*$ && $DB_USER =~ ^[a-z_][a-z0-9_]*$ ]] || fail "DB_NAME / DB_USER must be plain identifiers"
 [[ $PROJECT_NAME =~ ^[a-z][a-z0-9-]{2,20}$ ]] || fail "PROJECT_NAME must be lower case letters, digits and dashes"
+[[ $PG_MAJOR =~ ^[0-9]{2}$ ]] || fail "PG_MAJOR must be a PostgreSQL major version, for example 19"
 case $MODE in
   aws)
     [[ -n $AWS_REGION ]] || AWS_REGION=$(imds placement/region || true)
@@ -97,7 +105,7 @@ CONF
 
 # ---- packages -------------------------------------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
-PACKAGES=(postgresql openssh-server unattended-upgrades)
+PACKAGES=(postgresql-common openssh-server unattended-upgrades)
 # The few AWS calls are made with python3 and boto3 (small, and packaged by Ubuntu).
 [[ $MODE == aws ]] && PACKAGES+=(python3-boto3)
 # At first boot Ubuntu's own daily update job can hold the package locks for a while: wait for it.
@@ -107,6 +115,61 @@ for _ in 1 2 3 4 5 6; do
   sleep 10
 done
 apt_get install -y -qq "${PACKAGES[@]}" >/dev/null
+
+# PostgreSQL comes from the PostgreSQL project's own repository, apt.postgresql.org: Ubuntu ships
+# one major version per Ubuntu release, the project every version as it comes out, with its fixes.
+# Ubuntu's postgresql-common package holds the script that adds it, and the key it is signed with.
+if [[ ! -e /etc/apt/sources.list.d/pgdg.sources ]]; then
+  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null
+fi
+
+# The cluster in use is the newest "main" there is. Without one (a new host) it is PG_MAJOR.
+installed=$(pg_lsclusters -h 2>/dev/null | awk '$2 == "main" { print $1 }' | sort -n | tail -n 1)
+upgrade_from=""
+if [[ -n $installed && $installed -lt $PG_MAJOR ]]; then
+  if [[ ${UPGRADE_POSTGRES:-0} == 1 ]]; then
+    upgrade_from=$installed
+    # The upgrade copies the data, so the disk needs room for a second copy (and some to spare).
+    used_kb=$(du -sk "/var/lib/postgresql/${installed}/main" | cut -f1)
+    free_kb=$(df --output=avail -k /var/lib/postgresql | tail -n 1)
+    (( free_kb > used_kb * 12 / 10 + 512 * 1024 )) ||
+      fail "not enough free disk for the upgrade: the database uses $(( used_kb / 1024 )) MB, $(( free_kb / 1024 )) MB are free. Grow the disk first (docs/BACKUP-AND-MIGRATION.md)"
+  else
+    echo "PostgreSQL ${installed} stays in use. UPGRADE_POSTGRES=1 moves the database to ${PG_MAJOR}."
+    PG_MAJOR=$installed
+  fi
+fi
+had_cluster=no
+[[ -d /etc/postgresql/${PG_MAJOR}/main ]] && had_cluster=yes
+apt_get install -y -qq "postgresql-${PG_MAJOR}" "postgresql-client-${PG_MAJOR}" >/dev/null
+# Only the versioned packages: the "postgresql" package would follow every new major version on its
+# own (and with it, a new empty cluster). The server in use is kept even when nothing needs it.
+apt-mark manual "postgresql-${PG_MAJOR}" "postgresql-client-${PG_MAJOR}" >/dev/null
+if [[ $(dpkg-query -W -f='${Status}' postgresql 2>/dev/null) == "install ok installed" ]]; then
+  apt_get remove -y -qq postgresql >/dev/null
+fi
+
+if [[ -n $upgrade_from ]]; then
+  # A backup first, while the old version still runs: the way back if anything goes wrong.
+  if [[ -x /usr/local/bin/eisenmail-backup ]]; then
+    /usr/local/bin/eisenmail-backup || fail "the backup before the upgrade did not work; nothing was changed"
+  fi
+  # The upgrade makes the new version's "main" cluster. One that was there before is a surprise (an
+  # earlier attempt?); an empty one the package install may just have made is removed.
+  if [[ $had_cluster == yes ]]; then
+    fail "a PostgreSQL ${PG_MAJOR} cluster exists already (an earlier attempt?). Look at pg_lsclusters before going on"
+  elif [[ -d /etc/postgresql/${PG_MAJOR}/main ]]; then
+    pg_dropcluster --stop "$PG_MAJOR" main
+  fi
+  echo "Moving the database from PostgreSQL ${upgrade_from} to ${PG_MAJOR}. It is unreachable until this is done."
+  # --method=upgrade is pg_upgrade, copying the data (no --link): the old cluster stays intact. It is
+  # stopped and set to start manually, and the new one takes over its port and settings.
+  pg_upgradecluster -v "$PG_MAJOR" --method=upgrade "$upgrade_from" main
+  # pg_upgrade carries most statistics over; this fills in what it could not.
+  su -s /bin/sh postgres -c "vacuumdb --all --analyze-in-stages --missing-stats-only --quiet"
+  echo "Done. PostgreSQL ${upgrade_from} is stopped and kept for a way back. When all is well (a week, say):"
+  echo "  sudo pg_dropcluster ${upgrade_from} main && sudo apt-get purge postgresql-${upgrade_from} postgresql-client-${upgrade_from}"
+fi
 
 # ---- aws mode: the few AWS calls this host makes ------------------------------------------------
 # Values travel on stdin, never on a command line, and errors are reported without them.
@@ -287,6 +350,8 @@ CONF
 cat > /etc/apt/apt.conf.d/52eisenmail-unattended-upgrades <<'CONF'
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "09:00";
+// PostgreSQL's own repository: its fixes (19.1, 19.2, ...) are installed like Ubuntu's.
+Unattended-Upgrade::Origins-Pattern { "origin=apt.postgresql.org"; };
 CONF
 
 # ---- nightly logical backup ---------------------------------------------------------------------

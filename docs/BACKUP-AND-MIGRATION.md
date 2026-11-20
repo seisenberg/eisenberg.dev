@@ -17,7 +17,7 @@ ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 ```
 
 How far these instructions have been tested: the dump and restore commands were run on
-Ubuntu 26.04 with PostgreSQL 18, exactly as written here. The commands that talk to AWS
+Ubuntu 26.04 with PostgreSQL 19, exactly as written here. The commands that talk to AWS
 (snapshots, replacing a disk, Session Manager) follow the AWS documentation but were written
 without an AWS account to try them in. The restore drill at the end is how you find out that
 they work for you, before the day you need them.
@@ -126,7 +126,7 @@ sudo cat /var/backups/eisenmail/<file> | sudo -u postgres pg_restore --clean --i
 ```
 
 **From any dump in S3.** The host cannot read the backup bucket, so the restore runs from your
-machine through a forwarded port. You need the PostgreSQL client tools, version 16 or later, and
+machine through a forwarded port. You need the PostgreSQL client tools, the same version as the server or later (19), and
 the Session Manager plugin (SETUP.md step 8).
 
 ```bash
@@ -280,6 +280,56 @@ sudo curl -fsSL -o /usr/local/sbin/eisenmail-db-host https://raw.githubuserconte
 sudo /usr/local/sbin/eisenmail-db-host
 ```
 
+**A new PostgreSQL version** (for example from 18 to 19). A host keeps the version it was set up
+with until you move it; a new host gets the version `infra/db-host.sh` names (`PG_MAJOR`). The move
+happens on the same machine and keeps the old version, stopped, as the way back. The site and the
+inbox are unreachable while the data is copied: a minute or two for a database of a few hundred MB.
+Mail that arrives meanwhile is processed afterwards.
+
+1. A snapshot of the disk, besides the dump the script takes first:
+
+   ```bash
+   VOLUME_ID=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId" --output text)
+   ```
+
+   ```bash
+   aws ec2 create-snapshot --volume-id $VOLUME_ID --description "before the PostgreSQL upgrade" --query SnapshotId --output text
+   ```
+
+2. In a shell on the host, the script of the commit you reviewed, then the move. It stops with a
+   message, and changes nothing, if the disk has too little room for a second copy of the data.
+
+   ```bash
+   sudo curl -fsSL -o /usr/local/sbin/eisenmail-db-host https://raw.githubusercontent.com/seisenberg/eisenberg.dev/<commit>/infra/db-host.sh
+   ```
+
+   ```bash
+   sudo UPGRADE_POSTGRES=1 /usr/local/sbin/eisenmail-db-host
+   ```
+
+3. Check: `pg_lsclusters` shows the new version online on port 5432 and the old one down. Open
+   the webmail and a message. The script ends with the usual "ready" block and a backup.
+
+4. The way back, if something is wrong with the new version. Stop it, give the old one its port
+   back, and swap which of the two starts with the machine:
+
+   ```bash
+   sudo pg_ctlcluster 19 main stop && sudo pg_conftool 19 main set port 5433 && sudo pg_conftool 18 main set port 5432
+   ```
+
+   ```bash
+   echo manual | sudo tee /etc/postgresql/19/main/start.conf && echo auto | sudo tee /etc/postgresql/18/main/start.conf && sudo systemctl daemon-reload && sudo pg_ctlcluster 18 main start
+   ```
+
+   Mail received since the move is then missing from the database; the next reconcile run (every
+   15 minutes, for the last 72 hours) puts it back.
+
+5. A week later, the old version can go (the command the script printed):
+
+   ```bash
+   sudo pg_dropcluster 18 main && sudo apt-get purge postgresql-18 postgresql-client-18
+   ```
+
 **Backup retention or anything else in the stack.** Pin the image CloudFormation built the
 machine from, so that it sees nothing to rebuild. The first command reads that image from the
 stack. The second prints the names of Canonical's parameters for exactly that image. Use the one
@@ -330,7 +380,7 @@ aws s3 sync s3://eisenmail-mail-$ACCOUNT ./eisenmail-export/mail
 - `mail/email-inbox/` holds the last 30 days of incoming mail as plain `.eml` text (the files have
   no extension). You do not need them if you have the dump. They are the untouched originals.
 
-A dump restores into any PostgreSQL of version 16 or later, on any machine, under any role name:
+A dump restores into a PostgreSQL of the same version as the one it was made on, or a newer one, on any machine, under any role name:
 
 ```bash
 createdb emails
@@ -403,7 +453,7 @@ only some of the code is indifferent to that.
 
 | Part | Today | Outside AWS |
 | --- | --- | --- |
-| Database | PostgreSQL 18 on a small machine | Nothing to change. PostgreSQL 18 or later: a dump restores into the same or a newer version, not an older one. See above |
+| Database | PostgreSQL 19 on a small machine | Nothing to change. PostgreSQL 19 or later: a dump restores into the same or a newer version, not an older one. See above |
 | Web site and webmail | The web container on Lambda, behind API Gateway | Runs as it is. The container is a plain HTTP server on port 8080 and runs anywhere docker runs. Put any reverse proxy with TLS in front of it and set `TRUSTED_PROXY_HOPS` to the number of proxies. It can take its secrets from environment variables instead of SSM (`POSTGRES_DB_PASSWORD`, `VAPID_PRIVATE_KEY`, and `SSH_TUNNEL_KEY_PATH` for a key file) |
 | Sending mail | SES, called through the AWS SDK by both containers | Needs code. There is no SMTP sender. One would have to be added to `src/server/send.ts` and to the Python forwarder, along with new DKIM and SPF records for whoever sends the mail |
 | Receiving mail | SES receives, stores the raw message in S3 and calls the inbox function with its verdicts (spam, virus, SPF, DKIM, DMARC) | Needs an adapter. The inbox handler expects an SES-shaped event and reads the message from S3. A different way in (your own mail server, or another provider's inbound hook) needs a small program that stores the message, builds that event and calls the handler. It must supply a trustworthy DMARC verdict, because the reply relay only acts on mail SES marked as DMARC `PASS` |
